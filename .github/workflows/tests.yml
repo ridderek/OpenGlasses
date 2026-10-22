@@ -164,9 +164,12 @@ jobs:
 
       - name: Run unit tests
         # Below the job's 90-minute cap so a hung run fails while there is still budget to
-        # report it. Healthy runs have measured 16-24 minutes, so this is about twice the
-        # slowest of them: a run past it has hung, and both hangs so far ran to the cap.
-        timeout-minutes: 50
+        # report it. Healthy warm runs measure 16-24 minutes. A cold fork has no SwiftPM
+        # cache, so the test bundle builds from scratch: fork run 39814358707 made steady,
+        # all-passing progress for the entire 50 minutes the old budget allowed (1002 suites
+        # green, cut off at the V-tests), so this fork's budget is 75 — still under the
+        # 90-minute job cap, still a cap for genuine hangs.
+        timeout-minutes: 75
         run: |
           set -o pipefail
           # -skipPackagePluginValidation/-skipMacroValidation: a fresh runner has trusted no
