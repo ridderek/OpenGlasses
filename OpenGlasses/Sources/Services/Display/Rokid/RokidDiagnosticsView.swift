@@ -11,7 +11,8 @@ import UIKit
 /// established:
 ///
 /// 1. Does iOS surface the accessory at all, and under which protocol string?
-/// 2. Does the glasses' host expect a framed iAP2 packet or the bare Caps blob?
+/// 2. What framing the accessory accepts. (Answered: bare Caps — see RokidMFIFraming.)
+///    The toggle stays so a different accessory can be probed.
 /// 3. What session id (frame bytes 9-10) does a fresh connection use?
 ///
 /// Every byte written and read is logged in hex so a failed probe is still evidence.
@@ -26,7 +27,7 @@ final class RokidDiagnosticsModel: ObservableObject {
 
     /// Which payload policy the transport applies. `.framed` writes `ff 5a …`; `.rawCaps`
     /// writes only the Caps blob inside it.
-    @Published var useRawCaps = false
+    @Published var useRawCaps = true
     @Published var sessionIDText = "1"
     @Published var rawHexText = ""
     @Published var channel = "Dev"

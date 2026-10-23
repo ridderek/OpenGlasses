@@ -1,11 +1,24 @@
-/// What to hand the transport. Both modes are genuine unknowns: every capture we have starts
-/// mid-session, so it cannot show whether the **phone** builds the `FF 5A` link frame (as the
-/// encoder does) or whether iOS's MFi stack wraps a bare Caps blob. Flip this on hardware
-/// rather than guessing — both encoders exist and are tested.
+/// How to hand a command to the transport.
+///
+/// **Settled on hardware, 2026-10-23.** `.rawCaps` is correct. The glasses' own
+/// `cxr-service` receives an EA-session payload and calls `rokid::Caps::parse2` on it
+/// directly (`NativeCXRService::handleEAPSessionPacket`, `libcxr_service_jni.so`),
+/// which requires `[u32 BE total][0x05]` at byte 0 and bytes 4 == 5. A framed
+/// `FF 5A` write instead puts `0x40` at byte 4, so `parse2` throws, the handler
+/// returns -1, and the accessory tears the session down — which is exactly what the
+/// device log showed (`removeEAPSessionId 0018`, then `handleEAPSessionPacket:002
+/// return -1`, then every later 41-byte write arriving for a session that no longer
+/// existed).
+///
+/// The `FF 5A` frame is what iOS's ExternalAccessory stack puts on the RFCOMM link —
+/// that is why every capture, which is taken at HCI level, shows it. It is the MFi/iAP2
+/// link layer's business, not ours.
 enum RokidMFIFraming: Equatable {
     /// Write the whole iAP2 link frame: sync, length, header, Caps, checksum.
+    /// Kept for the diagnostic probe and for any future accessory that expects it,
+    /// but it is the wrong choice for this hardware.
     case framed
-    /// Write only the Caps blob and let the MFi stack frame it.
+    /// Write only the Caps blob and let the MFi stack frame it. This is what works.
     case rawCaps
 }
 

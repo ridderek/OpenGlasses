@@ -84,8 +84,10 @@ final class RokidMFITransport: NSObject, ObservableObject, RokidTransporting {
     /// Connected accessories that advertise one of ``protocolStrings``, for the pairing UI.
     @Published private(set) var discovered: [(id: String, name: String)] = []
 
-    /// Set from a hardware experiment — see ``RokidMFIFraming``.
-    var framing: RokidMFIFraming = .framed
+    /// Settled on hardware — see ``RokidMFIFraming``. The MFi stack frames for us;
+    /// writing an already-framed packet makes the accessory reject the payload and
+    /// drop the session.
+    var framing: RokidMFIFraming = .rawCaps
 
     var isConnected: Bool { core.isOpen }
 

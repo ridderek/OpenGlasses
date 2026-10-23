@@ -521,14 +521,24 @@ CI run as the real gate.
    `xcodebuild test` on `macos-26`, so CI is the gate. Highest-risk files are the two
    new ones; the MFi transport touches `EASession`, `StreamDelegate` and a background
    run loop, none of which any Python mirror can exercise.
-2. **Whether we write raw Caps or the whole `ff 5a` frame.** Every capture starts mid-session
-   and contains exactly one frame type (`0x40`, all 3,690 checksum-valid frames), so it cannot
-   show whether iOS builds the iAP2 envelope or Rokid's app does. Both encoders are tested, so
-   this is one hardware experiment: launch with
-   `UserDefaults.standard.set(true, forKey: "rokidUsesMFI")` and set
-   `RokidMFITransport.framing` to `.rawCaps` first, then `.framed` if the glasses ignore
-   it. `.framed` is the default because every captured frame on the wire is framed *by
-   something*, and if that something is us then raw Caps would be doubly wrapped.
+2. ~~Whether we write raw Caps or the whole `ff 5a` frame.~~ **ANSWERED on hardware,
+   2026-10-23: write raw Caps.** The accessory settles it itself. Its
+   `NativeCXRService::handleEAPSessionPacket` takes the EA-session payload and calls
+   `rokid::Caps::parse2` on it immediately — no link-layer parsing in between — and
+   `parse2` (`libcaps.so` @`0xb7a8`) hard-requires `[u32 BE total][0x05]`: it returns 0 if
+   the length is under 6, throws unless byte 4 is `5`, byte-swaps the leading word and
+   accepts only if `total <= len`.
+
+   So a framed write is rejected at byte 4, where `0x40` sits instead of `0x05`. The
+   device log showed the whole cascade: the framed 53-byte write, then
+   `removeEAPSessionId 0018`, then `handleEAPSessionPacket:002 return -1`, then every
+   later 41-byte write arriving for a session that no longer existed
+   (`EAPSessionId 0018 not exists, ignore`). That also explains why zero bytes ever came
+   back: nothing was ever accepted, so the accessory had no session to reply on.
+
+   The `ff 5a` frame is iOS's ExternalAccessory layer, not ours — which is why every
+   HCI-level capture shows it. `RokidMFITransport.framing` therefore defaults to
+   `.rawCaps`; `.framed` is kept only for the diagnostic probe.
 3. **`Ai/KeyDown` / `Ai_Audio_Finish_Wake`**: the `SfS` float (6.0, 7.0, …) is unexplained; it
    looks like an audio level or duration but nothing confirms it.
 4. **The two trailing numbers of `uBuk`** are identified by observation only (selector 3 or 4;

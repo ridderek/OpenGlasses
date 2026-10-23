@@ -118,7 +118,10 @@ What a capture could **not** settle, and what hardware still has to answer, is b
    `acp_challenge_data`, `acp_serial_number` all present). What hardware must settle is
    (a) whether iOS surfaces the accessory for our protocol at all, (b) whether Rokid's own
    app is hoarding the session — Classic MFi usually permits one, so force-quit it — and
-   (c) the `.rawCaps` vs `.framed` question above.
+   (c) ~~the `.rawCaps` vs `.framed` question above~~ — **answered 2026-10-23: raw Caps.**
+   The accessory runs `rokid::Caps::parse2` straight on the EA-session payload, and that
+   parser requires `0x05` at byte 4, which a framed write does not provide. `.rawCaps`
+   is now the transport default.
 4. Param schemas → validate `RokidCommand.notification` / `.customView` against the device.
    Neither appears anywhere in the capture, so their shapes are guesses and should be
    expected to be wrong.
