@@ -385,6 +385,36 @@ final class RokidCapsCodecTests: XCTestCase {
         XCTAssertNil(RokidIAP2Packet.sessionID(of: [0xFF, 0x5A, 0x00, 0x0D, 0x40, 0, 0, 0, 0]))
     }
 
+    /// The EA-session payload the accessory actually parses with
+    /// `rokid::Caps::parse2`. It requires `[u32 BE total][0x05]`, so any framing
+    /// that is not removed first makes the accessory drop the session. That is
+    /// what happened on hardware before this default was flipped.
+    func testRawCapsPayloadIsABareCapsBlob() throws {
+        let frame = RokidIAP2Packet.encodeCommand(
+            sequence: 12,
+            channel: "Dev",
+            method: "Dev_GetGlassInfo",
+            payload: nil,
+            timestampMicroseconds: 1_792_707_897_725
+        )
+
+        let wire = RokidMFIPayload.payload(for: frame, framing: .rawCaps)
+        let decoded = try XCTUnwrap(RokidIAP2Packet.decode(frame))
+        XCTAssertEqual(wire, RokidCapsCodec.encode(decoded.caps))
+
+        // 53-byte frame less the 4-byte prefix, 7-byte header and 1-byte checksum.
+        XCTAssertEqual(frame.count, 53)
+        XCTAssertEqual(wire.count, 41)
+
+        XCTAssertEqual(wire[4], 0x05, "parse2 rejects anything but the version byte here")
+        let total = Int(wire[0]) << 24 | Int(wire[1]) << 16 | Int(wire[2]) << 8 | Int(wire[3])
+        XCTAssertEqual(total, wire.count, "parse2 accepts only when total <= len")
+        XCTAssertEqual(wire[5], 4, "route, sequence, channel, object")
+
+        // Framed mode still passes the complete frame through unchanged.
+        XCTAssertEqual(RokidMFIPayload.payload(for: frame, framing: .framed), frame)
+    }
+
     // MARK: - Helpers
 
     private static func hex(_ string: String) -> [UInt8] {

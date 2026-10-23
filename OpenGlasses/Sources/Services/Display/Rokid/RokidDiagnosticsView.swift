@@ -340,13 +340,16 @@ struct RokidDiagnosticsView: View {
 
     private var commandSection: some View {
         Section("Commands") {
-            Button("Probe as framed") {
-                Task { await model.probe(.framed) }
-            }
             Button("Probe as rawCaps") {
                 Task { await model.probe(.rawCaps) }
             }
-            Text("Each probe sends Dev_GetGlassInfo, which is a read: the glasses answer with a device descriptor and change nothing. Run one, then the other, and see which produces a reply.")
+            Button("Probe as framed (kills the session)") {
+                Task { await model.probe(.framed) }
+            }
+            Text("Each probe sends Dev_GetGlassInfo, which is a read: the glasses answer with a device descriptor and change nothing.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("Use rawCaps. The accessory runs rokid::Caps::parse2 straight on the EA-session payload, and that parser requires 0x05 at byte 4. A framed packet puts 0x40 there, so the accessory rejects it and tears the session down, after which every write is ignored until you reconnect.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
