@@ -604,6 +604,23 @@ enum RokidCapsMessage: Equatable {
         }
     }
 
+    static func decodeCaps(_ caps: [RokidCapsValue]) -> RokidCapsMessage? {
+        guard case .uint32(let routeID)? = caps.first,
+              let kind = RokidCapsRoute(rawValue: routeID) else { return nil }
+        switch kind {
+        case .request, .event:
+            guard caps.count >= 4, case .uint32(let sequence) = caps[1],
+                  case .string(let channel) = caps[2], case .object(let members) = caps[3],
+                  case .string(let method)? = members.first else { return nil }
+            let payload = members.count >= 2 ? members[1] : nil
+            return kind == .request ? .request(route: routeID, sequence: sequence, channel: channel, method: method, payload: payload) : .notification(route: routeID, channel: channel, method: method, payload: payload)
+        case .reply:
+            guard caps.count >= 3, case .uint32(let sequence) = caps[1],
+                  case .object(let members) = caps[2], case .string(let method)? = members.first else { return nil }
+            return .reply(route: routeID, sequence: sequence, method: method, payload: members.count >= 2 ? members[1] : nil)
+        default: return nil
+        }
+    }
     static func decode(_ bytes: [UInt8]) -> RokidCapsMessage? {
         guard let frame = RokidIAP2Packet.decode(bytes),
               case .uint32(let routeID)? = frame.caps.first,

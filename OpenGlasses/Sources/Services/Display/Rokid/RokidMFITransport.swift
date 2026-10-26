@@ -154,6 +154,7 @@ final class RokidMFITransport: NSObject, ObservableObject, RokidTransporting {
             throw RokidMFIError.streamsUnavailable
         }
 
+        core.setRawCaps(framing == .rawCaps)
         core.open(session: session)
         refresh()
     }
@@ -195,12 +196,20 @@ private final class RokidMFIStreamCore: NSObject, StreamDelegate {
     private var output: OutputStream?
     private var thread: Thread?
     private var drain = RokidFrameDrain()
+    private var rawCaps = true
+    private var rawCapsPending: [UInt8] = []
     private var closing = false
 
     var isOpen: Bool {
         lock.lock()
         defer { lock.unlock() }
         return session != nil && input != nil && output != nil && !closing
+    }
+
+    func setRawCaps(_ value: Bool) {
+        lock.lock()
+        rawCaps = value
+        lock.unlock()
     }
 
     func open(session: EASession) {
@@ -210,6 +219,7 @@ private final class RokidMFIStreamCore: NSObject, StreamDelegate {
         self.output = session.outputStream
         self.closing = false
         self.drain.reset()
+        self.rawCapsPending.removeAll(keepingCapacity: true)
         lock.unlock()
 
         let thread = Thread { [weak self] in self?.runStreamLoop() }
@@ -292,12 +302,31 @@ private final class RokidMFIStreamCore: NSObject, StreamDelegate {
             let read = stream.read(&chunk, maxLength: chunk.count)
             guard read > 0 else { break }
 
-            let frames: [[UInt8]]
+            let bytes = Array(chunk[0..<read])
             lock.lock()
-            frames = drain.append(Array(chunk[0..<read]))
+            let raw = rawCaps
+            let frames = raw ? [] : drain.append(bytes)
             lock.unlock()
 
-            for frame in frames { onFrame?(frame) }
+            if raw {
+                var blobs: [[UInt8]] = []
+                lock.lock()
+                rawCapsPending.append(contentsOf: bytes)
+                while rawCapsPending.count >= 4 {
+                    let total = Int(rawCapsPending[0]) << 24 | Int(rawCapsPending[1]) << 16 | Int(rawCapsPending[2]) << 8 | Int(rawCapsPending[3])
+                    guard total >= 6, total <= 65_536 else {
+                        rawCapsPending.removeFirst()
+                        continue
+                    }
+                    guard rawCapsPending.count >= total else { break }
+                    blobs.append(Array(rawCapsPending.prefix(total)))
+                    rawCapsPending.removeFirst(total)
+                }
+                lock.unlock()
+                for blob in blobs { onFrame?(blob) }
+            } else {
+                for frame in frames { onFrame?(frame) }
+            }
         }
     }
 

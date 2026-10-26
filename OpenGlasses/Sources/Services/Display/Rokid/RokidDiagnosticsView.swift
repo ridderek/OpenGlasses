@@ -184,7 +184,7 @@ final class RokidDiagnosticsModel: ObservableObject {
         append("TX \(framing == .rawCaps ? "rawCaps" : "framed") \(frame.count) B frame, \(wire.count) B on the wire: \(hex(frame))")
 
         do {
-            try await transport.send(frame)
+            try await transport.send(wire)
             bytesOut += wire.count
             sequence &+= 1
             append("TX ok, next seq \(sequence)")
@@ -199,6 +199,19 @@ final class RokidDiagnosticsModel: ObservableObject {
         bytesIn += bytes.count
         append("RX \(bytes.count) B: \(hex(bytes))")
 
+        if framing == .rawCaps {
+            var offset = 0
+            guard let caps = try? RokidCapsCodec.decode(bytes, offset: &offset), offset == bytes.count else {
+                append("RX: not a decodable raw Caps blob")
+                return
+            }
+            append("RX raw Caps tags \(caps.map { String($0.typeTag) }.joined())")
+            if let message = RokidCapsMessage.decodeCaps(caps) {
+                append("RX message method \(message.method) channel \(message.channel ?? "-") payload \(message.textPayload ?? "-")")
+            }
+            return
+        }
+
         guard let frame = RokidIAP2Packet.decode(bytes) else {
             append("RX: not a decodable iAP2 frame (bad sync, length or checksum)")
             return
@@ -208,7 +221,7 @@ final class RokidDiagnosticsModel: ObservableObject {
         append("RX frame route \(hex4(UInt16(truncatingIfNeeded: frame.route))) seq \(seq) ts \(frame.timestampMicroseconds) session \(hex4(frame.sessionID))")
         append("RX tags \(frame.caps.map { String($0.typeTag) }.joined())")
 
-        if let message = RokidCapsMessage.decode(bytes) {
+        if let message = RokidCapsMessage.decodeCaps(frame.caps) {
             append("RX message method \(message.method) channel \(message.channel ?? "-") payload \(message.textPayload ?? "-")")
         }
         if let transfer = RokidMediaTransfer.decode(bytes) {
