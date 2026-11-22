@@ -33,8 +33,12 @@ final class RokidDiagnosticsModel: ObservableObject {
     @Published var channel = "Dev"
     @Published var method = "Dev_GetGlassInfo"
     @Published var payloadText = ""
+    /// Text the AI-answer demo displays on the glasses.
+    @Published var demoText = "Hello from Avenkin"
 
     private var transport: RokidMFITransport?
+    /// Per-connection UUID carried by the CXR connect hello; regenerated on each connect.
+    private var helloUUID = UUID()
     private let clock = DispatchTime.now()
     private static let clockFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -119,6 +123,14 @@ final class RokidDiagnosticsModel: ObservableObject {
             try await transport.connect()
             isConnected = transport.isConnected
             append(isConnected ? "EASession open" : "connect() returned without a session")
+            if isConnected {
+                // A fresh connection restarts the Caps sequence counter, and the CXR
+                // hello goes out first — the official app sends it ~1 ms after its
+                // session start, before any command.
+                sequence = 1
+                helloUUID = UUID()
+                await sendHello()
+            }
         } catch {
             isConnected = false
             append("connect failed: \(String(describing: error))")
@@ -139,6 +151,68 @@ final class RokidDiagnosticsModel: ObservableObject {
         await send(channel: "Dev", method: "Dev_GetGlassInfo", payload: nil, framing: wanted)
         transport.framing = previous
         append("--- probe finished; watching for a reply ---")
+    }
+
+    /// The CXR connect hello, decoded from the 2026-11-21 cold-connect capture: a
+    /// seven-member tuple on route 0x1004 — `(route, sequence, 15, uuid,
+    /// nanosecondsSinceEpoch, eapProtocolID, "")`. The glasses answer on route 0x1005
+    /// with `(route, sequence, 15, status, phoneBluetoothAddress)`; until this exchange
+    /// happens the CXR service ignores every command sent on the session. Member 3 is
+    /// 15 in both directions of the captured exchange; its meaning is unknown.
+    private func sendHello() async {
+        guard let transport, isConnected else { return }
+        let blob = RokidCapsCodec.encode([
+            .uint32(0x1004),
+            .uint32(sequence),
+            .uint32(15),
+            // The CXR service keys registration to this UUID: it is the official app's
+            // client identity, recovered from the 2026-11-21 cold-connect capture. A
+            // fresh UUID is ignored (Test A, 2026-11-21, fresh link and all); this one
+            // is answered, and Dev_GetGlassInfo round-trips behind it — first proven
+            // 2026-11-21 17:51 ET. How a new client UUID gets registered is still
+            // unknown; until it is, this is the identity the probe presents.
+            .string("7050c2b0-ce7a-43e4-9d12-ccf78672aa23"),
+            .uint64(UInt64(Date().timeIntervalSince1970 * 1_000_000_000)),
+            .uint32(transport.connectedProtocolID),
+            .string(""),
+        ])
+        append("TX CXR hello (route 0x1004, protocol id \(transport.connectedProtocolID)) \(blob.count) B: \(hex(blob))")
+        do {
+            try await transport.send(blob)
+            bytesOut += blob.count
+            sequence &+= 1
+            append("TX hello ok, next seq \(sequence)")
+        } catch {
+            append("TX hello failed: \(String(describing: error))")
+        }
+    }
+
+    /// Mirror the official app's answer choreography inside a glasses-opened AI scene:
+    /// heartbeat, the recognised question, ASR end, then the answer text. The scene is
+    /// opened by the glasses themselves — a button press makes them send
+    /// `Ai_SceneStatus` (aiAssistRunning true) and `KeyDown` — and the phone never
+    /// starts it: the official app sends no `Ai_Start` anywhere in the 2026-11-21
+    /// capture, and `TTS_Result` sent outside that scene is ignored, as this probe's
+    /// standalone tries showed. Fire this within a few seconds of the button press.
+    func sendAIAnswerDemo() async {
+        // Paced to match the official app's captured timing (2026-11-21 cold-connect
+        // capture, Q&A at 10:56:57-10:57:03): cloud status and a heartbeat as the
+        // scene opens, ASR partials building the question over ~2 s, ASR_End, a
+        // ~1.8 s "thinking" pause, then the answer. The first one-burst version of
+        // this demo (all four sends in the same millisecond) rendered nothing —
+        // the glasses' scene state machine appears to need the beats.
+        await send(channel: "Sys", method: "Sys_Cloud_Server_Status", payload: .string("{\"status\":1}"), framing: framing)
+        await send(channel: "Ai", method: "Ai_Heartbeat", payload: .string("{\"count\":1}"), framing: framing)
+        try? await Task.sleep(nanoseconds: 450_000_000)
+        await send(channel: "Ai", method: "ASR_Result", payload: .string("Who is"), framing: framing)
+        try? await Task.sleep(nanoseconds: 450_000_000)
+        await send(channel: "Ai", method: "ASR_Result", payload: .string("Who is Avenkin"), framing: framing)
+        try? await Task.sleep(nanoseconds: 450_000_000)
+        await send(channel: "Ai", method: "ASR_Result", payload: .string("Who is Avenkin?"), framing: framing)
+        await send(channel: "Ai", method: "ASR_End", payload: nil, framing: framing)
+        try? await Task.sleep(nanoseconds: 1_800_000_000)
+        await send(channel: "Ai", method: "Ai_Heartbeat", payload: .string("{\"count\":1}"), framing: framing)
+        await send(channel: "Ai", method: "TTS_Result", payload: .string(demoText), framing: framing)
     }
 
     func sendComposedCommand() async {
@@ -206,6 +280,24 @@ final class RokidDiagnosticsModel: ObservableObject {
                 return
             }
             append("RX raw Caps tags \(caps.map { String($0.typeTag) }.joined())")
+            if caps.count >= 5, case .uint32(0x1005) = caps[0] {
+                var status = "-"
+                if case .int32(let value) = caps[3] { status = String(value) }
+                var address = "-"
+                if case .string(let value) = caps[4] { address = value }
+                append("RX CXR hello reply: status \(status), phone address \(address) — session registered")
+            }
+            if caps.count == 3, case .uint32(0x1003) = caps[0],
+               case .string(let eventChannel) = caps[1],
+               case .object(let eventObject) = caps[2],
+               let firstMember = eventObject.first,
+               case .string(let methodName) = firstMember {
+                var detail = ""
+                if eventObject.count > 1, case .string(let text) = eventObject[1] {
+                    detail = " " + text
+                }
+                append("RX event \(eventChannel)/\(methodName)\(detail)")
+            }
             if let message = RokidCapsMessage.decodeCaps(caps) {
                 append("RX message method \(message.method) channel \(message.channel ?? "-") payload \(message.textPayload ?? "-")")
             }
@@ -378,6 +470,15 @@ struct RokidDiagnosticsView: View {
             Button("Send composed command") {
                 Task { await model.sendComposedCommand() }
             }
+            TextField("AI answer text", text: $model.demoText)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Button("Send AI answer demo") {
+                Task { await model.sendAIAnswerDemo() }
+            }
+            Text("Press the glasses' button first so the glasses open the AI scene — watch the log for Ai_SceneStatus and KeyDown — then tap this within a few seconds.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
     }
 

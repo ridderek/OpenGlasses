@@ -4,6 +4,51 @@ Everything a person holding the RV101 and a Mac needs in order to turn the dark 
 `Sources/Services/{Display,Camera,Microphone}/Rokid/` into working ones. Nothing here needs to
 happen for CI: the unit tests are deterministic and run without hardware.
 
+## PROVEN ON HARDWARE — 2026-11-21 (read this first)
+
+A full session was run end to end on the real RV101 ("Glasses_5016", system 1.29.013) from
+this app: connect, registration, a command round-trip, glasses events, and a text write to
+the lens. The recipe below is what worked, byte-verified against a PacketLogger cold-connect
+capture of the official app taken the same day. It supersedes three earlier claims in this
+doc: there **is** an app-level handshake (step 3); no Rokid SDK token is involved anywhere
+in the working path; and the session must open on `com.rokid.global.aiglasses`, not
+`com.rokid.aiglasses` (step 1).
+
+1. **Transport.** Open the `EASession` on `com.rokid.global.aiglasses` (iAP2 protocol id
+   **195**). The accessory advertises both protocol strings and `EASession` takes the first
+   match; on `com.rokid.aiglasses` (194) the session opens but the glasses' CXR service
+   never sends a single byte. Writes are bare Caps blobs on the session — iOS performs the
+   iAP2 framing.
+2. **Sequence numbers** are per-session, strictly increasing, not necessarily contiguous.
+3. **Registration hello (required).** Immediately after the session opens, send on route
+   `0x1004` the tuple `(route, seq=1, 15, clientUUID, nanosecondsSinceEpoch, 195, "")`
+   (tags `uuuSkuS`). The glasses reply on route `0x1005`:
+   `(route, seq, 15, status=1, phoneBluetoothAddress)` (tags `uuuiS`). **The service keys
+   registration to the UUID**: a freshly generated UUID is ignored even on a fresh link
+   (controlled test, 2026-11-21), while the official app's already-registered UUID is
+   answered. How a *new* client UUID becomes registered is unknown — the open question on
+   this path. Until it is solved, a client must present a UUID the glasses already know.
+4. **Commands.** Requests on route `0x1001` as `(route, seq, channel, object{method,
+   payload?})` (tags `uuSO`); replies arrive on `0x1002` echoing the seq; glasses-initiated
+   events and requests arrive on `0x1003` as `(route, channel, object{...})` (tags `uSO`).
+   First proven round-trip: `Dev_GetGlassInfo`, 2026-11-21 17:51 ET.
+5. **Display write.** Text renders only inside the glasses-opened AI scene. The wearer opens
+   it with the wake word **"Hi Rokid"**; the glasses then send `Ai_SceneStatus`
+   (`aiAssistRunning: true`) and `KeyDown`, and stream microphone audio up on route
+   `0x3002`. The phone answers with a *paced* choreography: `Sys_Cloud_Server_Status`
+   `{"status":1}`; `Ai_Heartbeat` `{"count":1}` (repeat ~every 2 s while the scene lives);
+   `ASR_Result` partials building the question; `ASR_End`; a ~1.8 s pause; then
+   `TTS_Result` chunks, which are the text the lens displays. Proven 2026-11-21 18:42 ET
+   ("Hello from Avenkin"). Negative results, same day: standalone `TTS_Result` with no open
+   scene renders nothing, and `Sys/WordTips_AiContent` is a mode-bound captions overlay
+   that does not draw on the home screen. In the official app, answer *audio* goes down via
+   route `0x3001` `playAudio` plus route `0x3002` audio data at 16 kHz — not yet exercised
+   from this app.
+6. **Host duties observed.** Hosted by this app, the glasses push `Dev_BatteryChanged`,
+   `Dev_Screen_Status` and `Dev_GlassSound` events, and request `Sys/Weather_GetData` and
+   `Sys_sendContacts` from the phone. iPhone notifications reach the lens over ANCS,
+   independently of the CXR session.
+
 ## Prerequisites
 
 | Need | Why |

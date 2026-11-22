@@ -50,11 +50,17 @@ enum RokidMFIError: LocalizedError, Equatable {
 /// `0x0051` out and `0x0b08` back, carrying RFCOMM, carrying iAP2 `FF 5A` link packets whose
 /// payload is a Caps tuple. See `docs/rokid-caps-encoding.md`.
 ///
-/// **What iOS does for us.** There is no app-level handshake to reverse: the captured session
-/// goes from RFCOMM modem text (`+CIEV: 5,3`) straight into a complete command. MFi
-/// identification and authentication are performed by the OS against the Apple
-/// Authentication Coprocessor at `/sys/devices/platform/soc/988000.i2c/i2c-2/2-0010`
-/// (confirmed present on the device), so this class only has to open a session and move bytes.
+/// **What iOS does for us.** MFi identification and authentication are performed by the
+/// OS against the Apple Authentication Coprocessor at
+/// `/sys/devices/platform/soc/988000.i2c/i2c-2/2-0010` (confirmed present on the device).
+///
+/// **What iOS does not do for us.** The glasses' CXR service ignores a session until the
+/// app registers on it. The 2026-11-21 cold-connect capture shows the official app
+/// sending a connect tuple on route `0x1004` — `(route, sequence, 15, uuid,
+/// nanosecondsSinceEpoch, eapProtocolID, "")` — one millisecond after its session start,
+/// and the glasses answering on route `0x1005` with the phone's Bluetooth address before
+/// any `Dev` command is served. Opening the `EASession` alone is not enough; whichever
+/// layer composes commands must send that hello first (the diagnostics probe does).
 ///
 /// **Threading.** `EASession` streams must be scheduled on a run loop that is being pumped, so
 /// the streams live on a dedicated `Thread` inside ``RokidMFIStreamCore``; only whole frames
@@ -66,11 +72,14 @@ enum RokidMFIError: LocalizedError, Equatable {
 final class RokidMFITransport: NSObject, ObservableObject, RokidTransporting {
 
     /// The two `mfi.eap` names in the glasses' `cxr-service.json`, in preference order:
-    /// `com.rokid.aiglasses` (id 194) and `com.rokid.global.aiglasses` (id 195). Both are
-    /// declared in `Info.plist` under `UISupportedExternalAccessoryProtocols`.
+    /// `com.rokid.global.aiglasses` (id 195) FIRST — the 2026-11-21 PacketLogger capture
+    /// of the official app shows its EAP session start (0xEA00) referencing protocol id
+    /// 195, and the glasses' Caps service answers only on that session; a session opened
+    /// on `com.rokid.aiglasses` (id 194) starts but is never answered. Both are declared
+    /// in `Info.plist` under `UISupportedExternalAccessoryProtocols`.
     nonisolated static let protocolStrings = [
-        "com.rokid.aiglasses",
         "com.rokid.global.aiglasses",
+        "com.rokid.aiglasses",
     ]
 
     /// Spelled as a literal rather than through the `EAAccessory` constant so this file does
@@ -90,6 +99,15 @@ final class RokidMFITransport: NSObject, ObservableObject, RokidTransporting {
     var framing: RokidMFIFraming = .rawCaps
 
     var isConnected: Bool { core.isOpen }
+
+    /// The protocol string the open session was created for. The CXR connect hello
+    /// carries the string's EAP protocol id (`com.rokid.global.aiglasses` is 195,
+    /// `com.rokid.aiglasses` is 194), so the layer that sends the hello reads it here.
+    private(set) var connectedProtocolString: String?
+
+    var connectedProtocolID: UInt32 {
+        connectedProtocolString == "com.rokid.aiglasses" ? 194 : 195
+    }
 
     private let core = RokidMFIStreamCore()
 
@@ -154,6 +172,7 @@ final class RokidMFITransport: NSObject, ObservableObject, RokidTransporting {
             throw RokidMFIError.streamsUnavailable
         }
 
+        connectedProtocolString = protocolString
         core.setRawCaps(framing == .rawCaps)
         core.open(session: session)
         refresh()
@@ -161,6 +180,7 @@ final class RokidMFITransport: NSObject, ObservableObject, RokidTransporting {
 
     func disconnect() {
         core.close()
+        connectedProtocolString = nil
         refresh()
     }
 
