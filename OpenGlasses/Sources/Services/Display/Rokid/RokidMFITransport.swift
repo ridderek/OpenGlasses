@@ -89,6 +89,9 @@ final class RokidMFITransport: NSObject, ObservableObject, RokidTransporting {
 
     var onEvent: (([UInt8]) -> Void)?
     var onDisconnect: ((Error?) -> Void)?
+    /// Called when an outbound write has to wait for the output stream to accept
+    /// bytes — the write is queued, not lost. Carries the queued byte count.
+    var onWriteWait: ((Int) -> Void)?
 
     /// Connected accessories that advertise one of ``protocolStrings``, for the pairing UI.
     @Published private(set) var discovered: [(id: String, name: String)] = []
@@ -118,6 +121,9 @@ final class RokidMFITransport: NSObject, ObservableObject, RokidTransporting {
         }
         core.onFailed = { [weak self] error in
             Task { @MainActor in self?.onDisconnect?(error) }
+        }
+        core.onWriteWait = { [weak self] count in
+            Task { @MainActor in self?.onWriteWait?(count) }
         }
         NotificationCenter.default.addObserver(
             self,
@@ -186,7 +192,7 @@ final class RokidMFITransport: NSObject, ObservableObject, RokidTransporting {
 
     func send(_ bytes: [UInt8]) async throws {
         guard isConnected else { throw RokidMFIError.notConnected }
-        try core.write(RokidMFIPayload.payload(for: bytes, framing: framing))
+        try await core.write(RokidMFIPayload.payload(for: bytes, framing: framing))
     }
 
     // MARK: - Notifications
@@ -205,12 +211,32 @@ final class RokidMFITransport: NSObject, ObservableObject, RokidTransporting {
 ///
 /// Every member is called either under `lock` or from the stream thread. `onFrame`/`onFailed`
 /// are assigned once, before ``open(session:)``, and never mutated afterwards.
+/// One queued outbound write. The continuation resumes when the last byte is on
+/// the stream, or throws when the stream errors or the session closes first.
+private struct RokidPendingWrite {
+    let id: UInt64
+    let bytes: [UInt8]
+    var offset = 0
+    var waited = false
+    let continuation: CheckedContinuation<Void, Error>
+}
+
 private final class RokidMFIStreamCore: NSObject, StreamDelegate {
 
     var onFrame: (([UInt8]) -> Void)?
     var onFailed: ((Error?) -> Void)?
+    /// Called once per write that cannot go out immediately, with its byte count.
+    var onWriteWait: ((Int) -> Void)?
 
     private let lock = NSLock()
+    /// Outbound writes waiting for the output stream, oldest first. The stream
+    /// refuses a write attempted before it signals space — the `writeFailed`s the
+    /// session layer logged when the answer choreography sent back-to-back in one
+    /// tick (2026-11-21) — so writes queue here and drain only while
+    /// `hasSpaceAvailable` holds. One drainer at a time; order is FIFO.
+    private var pendingWrites: [RokidPendingWrite] = []
+    private var nextWriteID: UInt64 = 0
+    private var drainActive = false
     private var session: EASession?
     private var input: InputStream?
     private var output: OutputStream?
@@ -251,33 +277,128 @@ private final class RokidMFIStreamCore: NSObject, StreamDelegate {
         thread.start()
     }
 
-    func write(_ bytes: [UInt8]) throws {
-        lock.lock()
-        let stream = output
-        lock.unlock()
-        guard let stream else { throw RokidMFIError.notConnected }
-
-        var offset = 0
-        while offset < bytes.count {
-            let written = bytes.withUnsafeBufferPointer { buffer -> Int in
-                guard let base = buffer.baseAddress else { return 0 }
-                return stream.write(base.advanced(by: offset), maxLength: bytes.count - offset)
+    /// Queue one write and suspend until it is fully on the stream. A stream that
+    /// has no space right now is a wait, not a failure: the write leaves when the
+    /// stream signals `hasSpaceAvailable`. Throws only on a real stream error or
+    /// when the session closes with the write still queued.
+    func write(_ bytes: [UInt8]) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            lock.lock()
+            guard !closing, output != nil else {
+                lock.unlock()
+                continuation.resume(throwing: RokidMFIError.notConnected)
+                return
             }
-            guard written > 0 else { throw RokidMFIError.writeFailed }
-            offset += written
+            let id = nextWriteID
+            nextWriteID &+= 1
+            pendingWrites.append(RokidPendingWrite(id: id, bytes: bytes, continuation: continuation))
+            lock.unlock()
+            drainQueue()
         }
+    }
+
+    private func drainQueue() {
+        lock.lock()
+        if drainActive {
+            lock.unlock()
+            return
+        }
+        drainActive = true
+        lock.unlock()
+
+        while drainStep() {}
+
+        lock.lock()
+        drainActive = false
+        let pending = !pendingWrites.isEmpty && !closing
+        lock.unlock()
+        // A write enqueued while this drain was finishing saw `drainActive` and
+        // stepped aside; if it is still queued, it is this drain's to pick up.
+        if pending { drainQueue() }
+    }
+
+    /// One drain quantum: write as much of the queue head as the stream takes.
+    /// Returns true when the queue may hold more that can go out right now.
+    private func drainStep() -> Bool {
+        lock.lock()
+        guard let stream = output, !pendingWrites.isEmpty, !closing else {
+            lock.unlock()
+            return false
+        }
+        var head = pendingWrites[0]
+        lock.unlock()
+
+        guard stream.hasSpaceAvailable else {
+            markWaited()
+            return false
+        }
+
+        let written = head.bytes.withUnsafeBufferPointer { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return stream.write(base.advanced(by: head.offset), maxLength: head.bytes.count - head.offset)
+        }
+
+        if written > 0 {
+            head.offset += written
+            lock.lock()
+            // The queue may have been torn down by `close()` while the write was
+            // in flight; only the still-queued head is this drain's to finish.
+            if pendingWrites.first?.id == head.id {
+                if head.offset >= head.bytes.count {
+                    pendingWrites.removeFirst()
+                    lock.unlock()
+                    head.continuation.resume()
+                } else {
+                    pendingWrites[0] = head
+                    lock.unlock()
+                }
+            } else {
+                lock.unlock()
+            }
+            return true
+        }
+        if written < 0 {
+            lock.lock()
+            let stillQueued = pendingWrites.first?.id == head.id
+            if stillQueued { pendingWrites.removeFirst() }
+            lock.unlock()
+            if stillQueued {
+                head.continuation.resume(throwing: RokidMFIError.writeFailed)
+            }
+            return false
+        }
+        // written == 0: the stream took nothing despite the flag — wait for the
+        // next space-available event rather than failing the write.
+        markWaited()
+        return false
+    }
+
+    private func markWaited() {
+        lock.lock()
+        var count: Int?
+        if !pendingWrites.isEmpty, !pendingWrites[0].waited {
+            pendingWrites[0].waited = true
+            count = pendingWrites[0].bytes.count
+        }
+        lock.unlock()
+        if let count { onWriteWait?(count) }
     }
 
     /// Tear down without notifying — the caller decides whether this close is worth reporting.
     func close() {
         lock.lock()
         closing = true
+        let pending = pendingWrites
+        pendingWrites.removeAll()
         input?.close()
         output?.close()
         session = nil
         input = nil
         output = nil
         lock.unlock()
+        for item in pending {
+            item.continuation.resume(throwing: RokidMFIError.notConnected)
+        }
     }
 
     private func isClosing() -> Bool {
@@ -369,6 +490,9 @@ private final class RokidMFIStreamCore: NSObject, StreamDelegate {
         if eventCode.contains(.endEncountered) {
             failed(nil)
             return
+        }
+        if eventCode.contains(.hasSpaceAvailable) {
+            drainQueue()
         }
         if eventCode.contains(.hasBytesAvailable) {
             readAvailableBytes()
