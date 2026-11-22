@@ -12,7 +12,7 @@ enum SharedTeleprompterInbox {
     /// `SharedAppState.appGroup` because the Share Extension does not compile that file.
     /// **Never change this value** (including in a rename): scripts shared from other apps would be
     /// written where the app never looks. Pinned by `StorageIdentifierGuardTests`.
-    static let appGroupID = "group.com.openglasses.app"
+    static let appGroupID = "group.com.ridderek.openglasses"
     private static let fileName = "teleprompter_inbox.json"
 
     /// Test seam: when set, used instead of the app-group container.

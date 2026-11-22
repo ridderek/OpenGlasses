@@ -3,7 +3,7 @@ import WidgetKit
 
 /// Cross-process state shared between the app and its widget/control extension.
 ///
-/// Backed by `UserDefaults(suiteName: "group.com.openglasses.app")` so writes from the
+/// Backed by `UserDefaults(suiteName: "group.com.ridderek.openglasses")` so writes from the
 /// widget process are immediately visible to the app. A Darwin notification is posted on
 /// every write so an alive (background or foreground) app process can react instantly.
 enum SharedAppState {
@@ -15,7 +15,7 @@ enum SharedAppState {
     /// **Never change this value** (including in a rename): the widget, Control and extensions
     /// would lose the data they share with the app — listening state, the deep-link trust token,
     /// pending teleprompter scripts. Pinned by `StorageIdentifierGuardTests`.
-    static let appGroup = "group.com.openglasses.app"
+    static let appGroup = "group.com.ridderek.openglasses"
     static let listeningChangedNotification = "com.openglasses.app.listening-changed"
 
     static var defaults: UserDefaults {

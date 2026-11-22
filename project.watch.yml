@@ -16,7 +16,7 @@ targets:
       path: OpenGlassesWatch/OpenGlassesWatch.entitlements
       properties:
         com.apple.security.application-groups:
-          - group.com.openglasses.app
+          - group.com.ridderek.openglasses
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.openglasses.app.watchkitapp
@@ -49,7 +49,7 @@ targets:
       path: OpenGlassesWatchWidget/OpenGlassesWatchWidget.entitlements
       properties:
         com.apple.security.application-groups:
-          - group.com.openglasses.app
+          - group.com.ridderek.openglasses
     info:
       path: OpenGlassesWatchWidget/Info.plist
       properties:

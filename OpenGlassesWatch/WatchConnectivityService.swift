@@ -6,7 +6,7 @@ import WidgetKit
 /// read state through. A literal because this watch target compiles none of the phone's shared
 /// files. **Never change this value** (including in a rename): whatever is stored under the suite
 /// is stranded under the old name. Pinned by `StorageIdentifierGuardTests`.
-private let appGroupId = "group.com.openglasses.app"
+private let appGroupId = "group.com.ridderek.openglasses"
 
 /// Watch-side WatchConnectivity service. Sends commands to the iPhone app
 /// and receives status updates including persona list, conversations, and quick actions.

@@ -16,7 +16,7 @@ private var watchWidgetFamilies: [WidgetFamily] {
 /// read state through. A literal because this watch target compiles none of the phone's shared
 /// files. **Never change this value** (including in a rename): whatever is stored under the suite
 /// is stranded under the old name. Pinned by `StorageIdentifierGuardTests`.
-private let appGroupId = "group.com.openglasses.app"
+private let appGroupId = "group.com.ridderek.openglasses"
 
 struct WatchState {
     var isListening: Bool

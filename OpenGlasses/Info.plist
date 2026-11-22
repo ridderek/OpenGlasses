@@ -2,25 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Apple's meaning, not the EAR's: NO = no export compliance documentation is required.
-	     The app uses standard algorithms (WebRTC DTLS-SRTP, the glasses SDK) beyond Apple's, and
-	     App Store Connect requires no documents for that while the app is not sold in France.
-	     YES without an ITSEncryptionExportComplianceCode is refused at upload (ITMS-90592).
-	     If France is ever made available, upload the French declaration, then set YES and add
-	     the code Apple issues. -->
-	<key>ITSAppUsesNonExemptEncryption</key>
-	<false/>
+	<key>AvenkinSourceCommit</key>
+	<string>$(AVENKIN_SOURCE_COMMIT)</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
-	<!-- A job the office sends as an .ogjob attachment (Plan FO P3c). Receive only: the app
-	     opens one, shows it for review and adds it to upcoming jobs on a tap; it never writes
-	     one out. Owner rank, so Mail and Files offer "Open with Avenkin". Opened as a copy
-	     (LSSupportsOpeningDocumentsInPlace NO) so the app reads it once and deletes the copy. -->
+	<key>CFBundleDisplayName</key>
+	<string>Avenkin</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
-		<!-- A spreadsheet of van stock (Plan IH P3). Receive only, opened as a copy: the app reads
-		     it into a review and nothing is applied until the technician taps Apply. Alternate
-		     rank, so a spreadsheet app stays the default and Avenkin is offered beside it. -->
 		<dict>
 			<key>CFBundleTypeName</key>
 			<string>Spreadsheet</string>
@@ -45,9 +34,6 @@
 				<string>com.openglasses.app.job</string>
 			</array>
 		</dict>
-		<!-- The setup file Avenkin Office saves for a device (.avenkinsetup). Receive only, opened
-		     as a copy like a job file. It carries the vendor-signed profile and licence; the app
-		     verifies both and the owner reviews them before anything is applied. -->
 		<dict>
 			<key>CFBundleTypeName</key>
 			<string>Avenkin Office Setup</string>
@@ -60,11 +46,6 @@
 				<string>com.openglasses.app.office-setup</string>
 			</array>
 		</dict>
-		<!-- A team-learning bundle (Plan FP P3): team-learning-<direction>-<time>.json, sent by
-		     email, Messages or AirDrop between a crew's phones and its reviewer. Plain JSON, so it
-		     is offered for JSON at Alternate rank — never Owner: other apps keep JSON. Opened as a
-		     copy; the app refuses any JSON that is not a bundle and applies nothing from one that
-		     is until it is accepted. -->
 		<dict>
 			<key>CFBundleTypeName</key>
 			<string>Team Learnings</string>
@@ -78,57 +59,6 @@
 			</array>
 		</dict>
 	</array>
-	<key>LSSupportsOpeningDocumentsInPlace</key>
-	<false/>
-	<key>UTExportedTypeDeclarations</key>
-	<array>
-		<dict>
-			<key>UTTypeIdentifier</key>
-			<string>com.openglasses.app.job</string>
-			<key>UTTypeDescription</key>
-			<string>Avenkin Job</string>
-			<key>UTTypeConformsTo</key>
-			<array>
-				<string>public.json</string>
-				<string>public.data</string>
-			</array>
-			<key>UTTypeTagSpecification</key>
-			<dict>
-				<key>public.filename-extension</key>
-				<array>
-					<string>ogjob</string>
-				</array>
-				<key>public.mime-type</key>
-				<array>
-					<string>application/vnd.openglasses.job+json</string>
-				</array>
-			</dict>
-		</dict>
-		<dict>
-			<key>UTTypeIdentifier</key>
-			<string>com.openglasses.app.office-setup</string>
-			<key>UTTypeDescription</key>
-			<string>Avenkin Office Setup</string>
-			<key>UTTypeConformsTo</key>
-			<array>
-				<string>public.json</string>
-				<string>public.data</string>
-			</array>
-			<key>UTTypeTagSpecification</key>
-			<dict>
-				<key>public.filename-extension</key>
-				<array>
-					<string>avenkinsetup</string>
-				</array>
-				<key>public.mime-type</key>
-				<array>
-					<string>application/vnd.openglasses.office-setup+json</string>
-				</array>
-			</dict>
-		</dict>
-	</array>
-	<key>CFBundleDisplayName</key>
-	<string>Avenkin</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -154,8 +84,8 @@
 	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
-	<key>AvenkinSourceCommit</key>
-	<string>$(AVENKIN_SOURCE_COMMIT)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>fb-viewapp</string>
@@ -211,19 +141,11 @@
 	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<false/>
 	<key>MWDAT</key>
 	<dict>
-		<!-- Opt out of Meta's SDK data collection. Both dictionaries are read by
-		     MWDATCore at configure() time: Analytics/OptOut suppresses the event
-		     uploader that posts to api2.ar.meta.com/mwsdk/telemetry, and
-		     CrashReporting/OptOut suppresses the SDK's own crash reporter. Absent
-		     or NO means opted in, so these must stay explicitly YES. -->
 		<key>Analytics</key>
-		<dict>
-			<key>OptOut</key>
-			<true/>
-		</dict>
-		<key>CrashReporting</key>
 		<dict>
 			<key>OptOut</key>
 			<true/>
@@ -232,11 +154,18 @@
 		<string>openglasses://</string>
 		<key>ClientToken</key>
 		<string>AR|$(MWDAT_META_APP_ID)|$(MWDAT_CLIENT_TOKEN_HASH)</string>
+		<key>CrashReporting</key>
+		<dict>
+			<key>OptOut</key>
+			<true/>
+		</dict>
 		<key>MetaAppID</key>
 		<string>$(MWDAT_META_APP_ID)</string>
 		<key>TeamID</key>
 		<string>$(DEVELOPMENT_TEAM)</string>
 	</dict>
+	<key>NSAlarmKitUsageDescription</key>
+	<string>Avenkin rings the alarms you set by voice, even when the phone is on silent.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
@@ -258,6 +187,11 @@
 	<string>Avenkin uses Bluetooth to connect to your smart glasses (Ray-Ban Meta or EVEN Realities G2).</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>Avenkin uses Bluetooth to connect to your smart glasses (Ray-Ban Meta or EVEN Realities G2).</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_http._tcp</string>
+		<string>_bonjour._tcp</string>
+	</array>
 	<key>NSCalendarsFullAccessUsageDescription</key>
 	<string>Avenkin accesses your calendar to tell you about upcoming events and create new ones hands-free.</string>
 	<key>NSCalendarsUsageDescription</key>
@@ -273,16 +207,11 @@
 	<key>NSHomeKitUsageDescription</key>
 	<string>Avenkin controls your smart home devices hands-free, by voice.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-		<string>Avenkin uses your local network to find self-hosted AI servers (Ollama, LM Studio, vLLM, LocalAI) without typing an address, and to stream video to a server on your own network.</string>
-		<key>NSBonjourServices</key>
-		<array>
-			<string>_http._tcp</string>
-			<string>_bonjour._tcp</string>
-		</array>
-		<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Avenkin uses your location to provide contextually relevant answers based on where you are.</string>
+	<string>Avenkin uses your local network to find self-hosted AI servers (Ollama, LM Studio, vLLM, LocalAI) without typing an address, and to stream video to a server on your own network.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>Avenkin uses your location in the background to alert you when you arrive at or leave a place you set a location reminder for.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Avenkin uses your location to provide contextually relevant answers based on where you are.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Avenkin needs microphone access to listen for wake words and transcribe your voice commands.</string>
 	<key>NSMotionUsageDescription</key>
@@ -295,8 +224,6 @@
 	<string>Avenkin creates and manages reminders so you can set them hands-free.</string>
 	<key>NSRemindersUsageDescription</key>
 	<string>Avenkin creates and manages reminders so you can set them hands-free.</string>
-	<key>NSAlarmKitUsageDescription</key>
-	<string>Avenkin rings the alarms you set by voice, even when the phone is on silent.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Avenkin uses speech recognition to detect the wake word and transcribe your voice questions for the AI assistant.</string>
 	<key>NSSupportsLiveActivities</key>
@@ -349,6 +276,53 @@
 		<string>UIInterfaceOrientationPortraitUpsideDown</string>
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.json</string>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Avenkin Job</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.openglasses.app.job</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>ogjob</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/vnd.openglasses.job+json</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.json</string>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Avenkin Office Setup</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.openglasses.app.office-setup</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>avenkinsetup</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/vnd.openglasses.office-setup+json</string>
+				</array>
+			</dict>
+		</dict>
 	</array>
 </dict>
 </plist>
