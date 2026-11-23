@@ -33,6 +33,22 @@ final class RokidDiagnosticsModel: ObservableObject {
     /// The app's own SenseVoice engine, reused across taps (model loads lazily).
     private let asrEngine = OnDeviceASREngine()
 
+    /// The relay's shared token, pasted once by the operator and kept in
+    /// UserDefaults — never in source.
+    @Published var relayToken: String = UserDefaults.standard.string(forKey: "avenkin.relayToken") ?? "" {
+        didSet { UserDefaults.standard.set(relayToken, forKey: "avenkin.relayToken") }
+    }
+    /// Remy's latest answer, once the relay delivers it.
+    @Published private(set) var relayAnswer: String?
+    /// True while a question is out and no answer has landed yet.
+    @Published private(set) var relayWaiting = false
+    /// An answer that arrived while the AI scene was closed, held until the
+    /// scene next opens (the lens only renders inside the scene).
+    private var pendingPresentation: (question: String, answer: String)?
+    /// Watches the session's scene state so a held answer presents itself
+    /// the moment the wearer reopens the scene.
+    private var sceneCancellable: AnyCancellable?
+
     /// The session layer this probe operates, exposed so the view can observe the
     /// session's own published state (registration, scene, screen, battery) directly.
     let session: RokidCXRSession
@@ -47,6 +63,10 @@ final class RokidDiagnosticsModel: ObservableObject {
         self.session = session
         session.onTrace = { [weak self] line in
             Task { @MainActor in self?.append(line) }
+        }
+        sceneCancellable = session.$aiSceneActive.sink { [weak self] active in
+            guard active else { return }
+            Task { @MainActor in self?.presentPendingAnswer() }
         }
     }
 
@@ -202,6 +222,94 @@ final class RokidDiagnosticsModel: ObservableObject {
         } catch {
             append("transcribe failed: \(String(describing: error))")
         }
+    }
+
+    // MARK: - Relay (the Remy front door)
+
+    /// Send the current transcript (plus the latest photo, when one exists)
+    /// to the relay at relay.apsisai.com and poll for Remy's answer. The
+    /// answer shows in the probe the moment it lands; it renders on the lens
+    /// right away if the AI scene is open, or when the scene next opens.
+    func askRemy() async {
+        guard let question = micTranscript, !question.isEmpty else {
+            append("relay: transcribe a mic clip first")
+            return
+        }
+        let token = relayToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else {
+            append("relay: paste the relay token first")
+            return
+        }
+        guard !relayWaiting else {
+            append("relay: already waiting on an answer")
+            return
+        }
+        relayWaiting = true
+        relayAnswer = nil
+        do {
+            var payload: [String: Any] = ["text": question]
+            if let photo = session.lastPhoto {
+                payload["photo"] = "data:image/jpeg;base64," + photo.base64EncodedString()
+            }
+            var request = URLRequest(url: URL(string: "https://relay.apsisai.com/ask")!)
+            request.httpMethod = "POST"
+            request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+                append("relay: ask failed, HTTP " + String(code))
+                relayWaiting = false
+                return
+            }
+            let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            guard let id = obj?["id"] as? String else {
+                append("relay: ask returned no id")
+                relayWaiting = false
+                return
+            }
+            append("relay: question sent, waiting for Remy")
+            await pollForAnswer(id: id, question: question, token: token)
+        } catch {
+            append("relay: ask failed: " + String(describing: error))
+            relayWaiting = false
+        }
+    }
+
+    /// Poll the relay for one question's answer, every 3 s for up to four
+    /// minutes, then present it.
+    private func pollForAnswer(id: String, question: String, token: String) async {
+        let answerURL = URL(string: "https://relay.apsisai.com/answer/" + id)!
+        for _ in 0..<80 {
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            do {
+                var request = URLRequest(url: answerURL)
+                request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
+                let (data, _) = try await URLSession.shared.data(for: request)
+                let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                if (obj?["status"] as? String) == "answered", let text = obj?["text"] as? String {
+                    relayAnswer = text
+                    relayWaiting = false
+                    append("remy: " + text)
+                    pendingPresentation = (question, text)
+                    presentPendingAnswer()
+                    return
+                }
+            } catch {
+                continue
+            }
+        }
+        relayWaiting = false
+        append("relay: no answer after four minutes, giving up the wait")
+    }
+
+    /// Render a held answer on the lens if the AI scene is open. Called when
+    /// an answer lands and whenever the scene opens.
+    private func presentPendingAnswer() {
+        guard let pending = pendingPresentation, session.aiSceneActive else { return }
+        pendingPresentation = nil
+        Task { await session.presentAnswer(question: pending.question, answer: pending.answer) }
     }
 
     /// Decode an audio file to mono Float samples via AVAudioFile.
@@ -370,6 +478,10 @@ struct RokidDiagnosticsView: View {
                 Text(transcript)
                     .font(.system(.caption, design: .default))
             }
+            if let answer = model.relayAnswer {
+                Text("Remy: " + answer)
+                    .font(.system(.caption, design: .default))
+            }
             if let photo = session.lastPhoto, let image = UIImage(data: photo) {
                 Image(uiImage: image)
                     .resizable()
@@ -444,6 +556,16 @@ struct RokidDiagnosticsView: View {
             Button("Transcribe mic clip") {
                 Task { await model.transcribeMicClip() }
             }
+            TextField("Relay token", text: $model.relayToken)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Button(model.relayWaiting ? "Waiting for Remy..." : "Ask Remy") {
+                Task { await model.askRemy() }
+            }
+            .disabled(model.relayWaiting || model.micTranscript == nil)
+            Text("Sends the transcript above (and the latest photo, if any) to relay.apsisai.com. The answer appears here and on the lens: right away if the AI scene is open, otherwise the next time the scene opens.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             if let url = model.micClipURL {
                 ShareLink(item: url) {
                     Text("Share mic clip")
