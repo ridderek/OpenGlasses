@@ -23,6 +23,8 @@ final class RokidDiagnosticsModel: ObservableObject {
     @Published var payloadText = ""
     /// Text the AI-answer demo displays on the glasses.
     @Published var demoText = "Hello from Avenkin"
+    /// Where the last saved photo buffer landed, once one has been saved.
+    @Published private(set) var photoBufferURL: URL?
 
     /// The session layer this probe operates, exposed so the view can observe the
     /// session's own published state (registration, scene, screen, battery) directly.
@@ -104,6 +106,38 @@ final class RokidDiagnosticsModel: ObservableObject {
     /// within a few seconds of that.
     func sendAIAnswerDemo() async {
         await session.presentAnswer(question: "Who is Avenkin?", answer: demoText)
+    }
+
+    /// Ask the glasses for a still; the reassembled photo lands in the session's
+    /// `lastPhoto`, and the log traces the transfer's start and completion.
+    func takePhoto() async {
+        await session.takePhoto()
+    }
+
+    func openCamera() async {
+        await session.openCamera()
+    }
+
+    /// Save the session's raw in-flight photo assembly to the app's Documents
+    /// folder, for offline dissection of the media-sync stream's structure.
+    func savePhotoBuffer() {
+        let data = session.photoAssemblySnapshot
+        guard !data.isEmpty else {
+            append("photo buffer: nothing assembled right now")
+            return
+        }
+        let name = "avenkin-photo-buffer-\(Int(Date().timeIntervalSince1970)).bin"
+        do {
+            // Temporary directory + the share sheet: the app's Documents folder
+            // is not exposed to the Files app (no file-sharing flag in the
+            // Info.plist), so a file saved there is unreachable for sharing.
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+            try data.write(to: url)
+            photoBufferURL = url
+            append("photo buffer saved: \(name) (\(data.count) B) — tap Share photo buffer")
+        } catch {
+            append("photo buffer save failed: \(String(describing: error))")
+        }
     }
 
     func sendComposedCommand() async {
@@ -241,6 +275,18 @@ struct RokidDiagnosticsView: View {
                 Text(session.batteryLevel.map { "\($0)%" } ?? "-")
                     .font(.system(.caption, design: .monospaced))
             }
+            HStack {
+                Text("Photo")
+                Spacer()
+                Text(session.lastPhoto.map { "\($0.count) B (\(session.photoChunksReceived) chunks)" } ?? (session.photoChunksReceived > 0 ? "receiving… \(session.photoChunksReceived) chunks" : "-"))
+                    .font(.system(.caption, design: .monospaced))
+            }
+            if let photo = session.lastPhoto, let image = UIImage(data: photo) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxHeight: 240)
+            }
             Button(session.isConnected ? "Disconnect" : "Open EASession") {
                 Task { await model.toggleConnection() }
             }
@@ -281,6 +327,23 @@ struct RokidDiagnosticsView: View {
                 Task { await model.sendAIAnswerDemo() }
             }
             Text("Say \"Hi Rokid\" first so the glasses open the AI scene — watch for AI scene: active above, or Ai_SceneStatus in the log — then tap this within a few seconds.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Button("Open camera (Ai_OpenCamera)") {
+                Task { await model.openCamera() }
+            }
+            Button("Take photo (Ai_TakePhoto)") {
+                Task { await model.takePhoto() }
+            }
+            Button("Save photo buffer") {
+                model.savePhotoBuffer()
+            }
+            if let url = model.photoBufferURL {
+                ShareLink(item: url) {
+                    Text("Share photo buffer")
+                }
+            }
+            Text("The photo streams back in 480 B chunks — watch the log for the transfer start and \"photo complete\", and the Photo row in Session. Whether OpenCamera must come first is unproven; try Take photo alone first.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
