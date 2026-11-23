@@ -118,6 +118,14 @@ final class RokidDiagnosticsModel: ObservableObject {
         await session.openCamera()
     }
 
+    func playTestTone() async {
+        await session.playTestTone()
+    }
+
+    func playSpokenTest() async {
+        await session.playSpokenTest()
+    }
+
     /// Save the session's raw in-flight photo assembly to the app's Documents
     /// folder, for offline dissection of the media-sync stream's structure.
     func savePhotoBuffer() {
@@ -334,6 +342,12 @@ struct RokidDiagnosticsView: View {
             }
             Button("Take photo (Ai_TakePhoto)") {
                 Task { await model.takePhoto() }
+            }
+            Button("Play test tone (playAudio)") {
+                Task { await model.playTestTone() }
+            }
+            Button("Play spoken test (TTS + tone)") {
+                Task { await model.playSpokenTest() }
             }
             Button("Save photo buffer") {
                 model.savePhotoBuffer()

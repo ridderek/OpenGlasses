@@ -273,6 +273,197 @@ final class RokidCXRSession: ObservableObject {
         }
     }
 
+    // MARK: - Audio playback
+
+    /// Play the embedded test chirp through the glasses' speaker: the audio-down
+    /// path, recovered from the 2026-11-21 cold-connect capture and re-mined
+    /// 2026-11-23. In the captured flow the glasses announced their audio session
+    /// (`AI_assistant` on route `0x3001`, descriptor `ifuu` = 1, 1.0, 1, 16000) as
+    /// the AI scene opened; the phone answered with a `playAudio` descriptor on
+    /// `0x3001`, streamed the answer as `uBuk` chunks on `0x3002`, and sent a stop
+    /// tuple on `0x3003` carrying the playback id. The answer itself was MP3 at
+    /// 16 kHz mono (Lavf-encoded, like the chirp below), in chunks of up to
+    /// 2,048 B. Outbound chunk members per the codec's frame survey: the selector
+    /// `u` is only ever 3 or 4 and the clock `k` is 0.
+    ///
+    /// The full official answer shape: the paced choreography first (cloud
+    /// status, heartbeat, ASR partials, ASR_End, thinking pause, heartbeat,
+    /// TTS_Result), then the chirp stream attached to that utterance. Tests
+    /// whether the glasses only route playAudio audio to the speaker while a
+    /// TTS utterance is open: three bare playTestTone streams (2026-11-23)
+    /// were accepted — Tts_PlayStart, Tts_PlayFinish result 1 — yet silent,
+    /// at both whisper-level and near-full-scale chirp amplitudes. PROVEN
+    /// 2026-11-23: with the utterance declared, the chirp was heard aloud
+    /// through the glasses' speaker. The utterance is the gate — audio
+    /// down rides TTS_Result.
+    func playSpokenTest() async {
+        await presentAnswer(question: "What is the test tone?", answer: "Three notes, rising.")
+        await playTestTone()
+    }
+
+    func playTestTone() async {
+        guard isConnected else {
+            trace("TX playAudio skipped: not connected")
+            return
+        }
+        let descriptor: [RokidCapsValue] = [
+            .uint32(RokidCapsRoute.audioPlay.rawValue),
+            .uint32(sequence),
+            .string("playAudio"),
+            .object([.int32(-1), .float(1.0), .uint32(1), .uint32(16000)]),
+            .uint32(2),
+            .uint32(3),
+        ]
+        if await sendAudioTuple(descriptor, label: "playAudio (route 0x3001)") {
+            sequence &+= 1
+            nextSequence = sequence
+        }
+        let mp3 = Self.testToneMP3
+        var offset = 0
+        var chunks = 0
+        while offset < mp3.count {
+            let end = min(offset + 1024, mp3.count)
+            let tuple: [RokidCapsValue] = [
+                .uint32(RokidCapsRoute.audioData.rawValue),
+                .binary(mp3.subdata(in: offset..<end)),
+                .uint32(3),
+                .uint64(0),
+            ]
+            _ = await sendAudioTuple(tuple, label: nil)
+            chunks += 1
+            offset = end
+            if offset < mp3.count { try? await Task.sleep(nanoseconds: 120_000_000) }
+        }
+        trace("TX audio stream: \(chunks) chunks, \(mp3.count) B of MP3 (16 kHz mono)")
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        _ = await sendAudioTuple(
+            [.uint32(RokidCapsRoute.audioStop.rawValue), .uint32(2)],
+            label: "audio stop (route 0x3003)")
+    }
+
+    /// Encode and send one audio-route tuple; returns whether the write landed.
+    /// Traced only when a label is given — chunks are counted by the caller.
+    private func sendAudioTuple(_ caps: [RokidCapsValue], label: String?) async -> Bool {
+        let blob = RokidCapsCodec.encode(caps)
+        do {
+            try await transport.send(blob)
+            bytesOut += blob.count
+            if let label { trace("TX \(label) (\(blob.count) B)") }
+            return true
+        } catch {
+            trace("TX \(label ?? "audio chunk") failed: \(String(describing: error))")
+            return false
+        }
+    }
+
+    /// The test chirp, synthesized sample-exact (16 kHz mono, MP3 64 kbps —
+    /// the official stream's own format — 1.4 s, near full scale) and embedded
+    /// base64 so the probe needs no bundled resource. Spliced in from chirp.b64
+    /// by script and verified byte-identical after splicing; do not hand-edit.
+    private static let testToneMP3: Data = Data(base64Encoded:
+        "//OIwAAAAAAAAAAAAEluZm8AAAAPAAAAKQAAL0AADAwSEhgYGB4eJCQkKiowMDA2Njw8Q0NDSUlPT09VVVtbW2FhZ2dnbW1zc3l5eYCAhoaGjIySkpKYmJ6epKSkqqqwsLC2try8vMPDycnJz8/V1dvb2+Hh5+fn" +
+        "7e3z8/P5+f//AAAAAExhdmM2Mi4yOAAAAAAAAAAAAAAAACQCgAAAAAAAAC9APN0buQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" +
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//OIxAA5wcoQAVzoAaeVw27bW2HrDpDoPltC0hZAwAADAQEMDAgwYEDCgYMOBgxWKTFYvMZjcx2QzJJRMplEyeYzUsfPd/U7" +
+        "irQ5mcIzOJs2nm0771k+F4E9RvM5jZ0yTHw2HdE3ZaU1bQ0zNJ0x7GMxREUw5DMwtCkwlB0wmB4wcBowWBQwQA4wMAowIAYwEAIwCAADAAAgHLNlty5aAdFdItMdTdQRUipF2LsZwzhnDXGvuW5bluW77/v/D7+P" +
+        "4/j+Q5GIxGJZG43G43G43T09PSUlJSUlJSUlinp6ent5h4YAAAAAB4eHh4YAAAA7///wAAIEkZKX9TEYTEn6Zyvot+OjZDAJZI0mLtHyi6UEQWAFTAHAB8wF4CFCoBcY//OIxCxBGrIwq5j4AAeAC5gc4GKncUAC" +
+        "xgHwD6YYCQ4GunIoxhrgbQYBmAkGFiDc52uZTgZlYBFGBogCRgu4eGdylTAmOIhnIEADSIAzbxqL9SsBAehgHIBCYAcAEjwA+BgAgvQjVDTwwdJ71BZ3VQeTgUHYi0NrlWPUeVW9lqtjjVya82jlu7A7+Q9jruW+" +
+        "Y3K2OOOWWWMORuWxeWS6WU87n398/Xf3vLLXOY/3Xz9S1Yzs28L9jO9/N5d/+f//vH/1/P///n/TkQiAyJwylc84WeLqW4Wo8og+BEHxyD4WijtasoqH+r/+fAwCBgMTnIDUaMAzWKDASwLowWkKIMMxCyDDYR4o" +
+        "xjPkeMoMHHjFKQnIwdMHeMD7AazAPwJM//OIxDoWeKY0A9X4AMC+AbzAUgF0wC4AIak9///T++t///nP/6f/////+j/XTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX/X6v2WaAY" +
+        "EDYGJSYBlZEgabUhgf4IQYLAC/mEnhXhioBFGdaL+FmwrDZYHGtGQGdQbIKFyBoGkDCaG4DCQE0DBWD4PUR/////b///nX////OIxE8Ykn4oAK/s4P//+7//9X/z2n7en/p0//dT7eWVTEFNRTMuMTAwVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV/2/9VRdAwAKAMNl8DFSEANK5gRgAIYKqBxmFZBIxjQI+Wevhylm8yjJoHbBLAGqcuoGYwngGM4dgGJMVYGE4NQGCcKofKgtvv6u//9uyv/t51///b/V/R///" +
+        "//OIxFobXAYkAK/s4G6/p/f/0Pv///vb//v//9X+r/PKTEFNRTMuMTAwqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" +
+        "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqof//+fBwYBq" +
+        "KBxyAHigmA1AV5gJ4KMYB4FLmAlkNRhQHssYKiNYCKSzDBIDF0mzF8LwcbBQTREK//OIxDgTAKY0Aqf64K1d///p/1///If/1f//+nR//R/rTEFNRTMuMTAwqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" +
+        "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" +
+        "qqqq9uv1fusuAYCGoGIz0BlpjgazbBgpYJgYPYDEmGrhTxj0xAyf2r2FnGwDJ4HoM9wGtAQoGU8OoGEcY4GCkWwGDwPoGCcNAZERV/9fXX/9upf/0vOt//7//+m///Xf//OIxF0cLAYgAK/s4P6Prb/zv++//+u3" +
+        "//b/9vf/X/m1TEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVR/q//UagYIkBnWoG2jAakmYBUApGBkghJg4ATAYi2P9nJCdS5qSYzSBvYScBnTKmBkgH8Bik" +
+        "FQBiDDeBhMB8BgnBiI9Qv//v//9v/29b//OIxE4Ycn4sAqfs4H//t//7f/+v6/m2j//9KdP/9X+hTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" +
+        "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" +
+        "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqh/7/2lgACGFwiPDQZHZkpNGrYuc+/RhPIj6Y6s3RHy7Pdpj5Al8YW2E/mDRg2Jg7AOYYc2B3GC5gOJgIAAsAgBsvgpux" +
+        "//OIxEUWQOIsAgc+5AfyNhm7/f/u/9XD3//////r/1/uTEFNRTMuMTAwqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" +
+        "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqkD////6sV4BALAweKgMZDsDMhjA0SfgNlLcDpNAM" +
+        "KEC7zHsUvw/aVUxMfjCmDCBgAUwA4EWMDoBxzCaQQsDfp+AxMHQMBgAMUi5jFI1N//OIxE4YYf4wBK/rIJv/////9/////ndez6dn////f6aTEFNRTMuMTAwqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" +
+        "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" +
+        "qqqqqqqqqqqqqqqqqqqqqv/L/XIYFgOYXAUYegAYHjgYgnaZbMsat2yYVcMxGPyzn5+ptfMZDmNRmGrBoxhEQQAYUuD9mKTAfphDgDwYDSAMmAPAAAQAHoaKbuXDlOYT//OIxFAY8OYkAAd+5P6NvxN/o+h/v//+" +
+        "z//7Dn9n+z5eTEFNRTMuMTAwqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" +
+        "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqh////9eLSBEEAYCEoGIxcBlMkAZ6KoGvTsBzZnmExg+xjpBoqfSQdLGPAAzZhBIDCYCq" +
+        "COmBBg2BgzwH0BqY6gYTDANoh6Q5JYPG//OIxEsXogI0Aq/rIse//////7f////OK9f//////7q6TEFNRTMuMTAwqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" +
+        "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq/f/+r7aLw1eBgYAIAUJsDDQCsDCULsDAwVoDFOjs" +
+        "DKk+4wqcjLMew2Bj69PGsyGIkAMO5EMTCtwkcw4YH8McfA7DC9QHEwJwAUAQDeEAFAYAFooMMduk3t/2083p/8hfv/r/T8M3//OIxGYeY1YcALfFJLP0/+n0//+v2/9fSv9+sfy+xv6KTEFNRTMuMTAwqqqqqqqq" +
+        "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" +
+        "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqwD////6sXwIASASJAMNCsDJg7Az2OgNiEcDpJ6MKEBPTHpyMg/QUnJMfpAyjCPgMAwI4FAMAsByzBCwQcD0+gMIbAeAEIRnimblp" +
+        "//OIxEsXuf40BK/pINv/////9////r+ZnVr2f//////TTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVX9v//t6TRHgDQNwChSgYeQhAYcRpAYGC3gYREoAYxYGmDOEiBiSO+ucPf82GKeklJh" +
+        "eQgAYUcDrGHJgoJjrQDiYYgAYAYFLEgHQWALxIAIR/ZW+lf9/6f9t6/9WVP///X8//OIxGEdIf4cALfFJB6aQ98l/fT/0bvfFDvq/xMtbPl1TEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVYA////+vFZCEFAOEoGDxMBkUVAZ4DIGyQUB1IFmFLgJhj6waefykHRGQQAKhhM4IeYF+CtmASA7BgJgIUBmv4DzgJARIhrkMJwtnn//////2/////OIxFMZkio0BK/pIvvqrQetlv50XCnu" +
+        "////+n+v//vVAbnIPO4EJZ3En4feVRR2Hxb9cjkq7Zg3rE27tKVgLnqbAIEIQMeByyCMyKIGEzAiAxAFM5MzAkozwgMJfTaJE3ecOOjzgRcwhMIdMtkw4DBuc9MyfkJWDgeEwbMBFMHGAITEjQi41zGgyuCox3LE" +
+        "w/LQzIHczFL41FVoHlodPwmaaTMaJKOa4hqZWDYuoFCQYcBwDANMEQLL/AIEFsqXy+RgEB0FjAoBhwAwUC5fRVjL30Zg01B9R5JBNNvmWQHAMKXY2Fe60H5a/HJVBzO2xMkXO6zLIDh2Lv49LbsogVx4hIpyNzUU" +
+        "huXP5NwxflEzF4hLYfuUdjOmlkrpqSve//OIxP9M0rYkHN/7Ibesb8oxp6l/DeWFfKk3ez1zOpjnq3gLA0kxZHIWSXZDJr/IWaNs1q7rPer7X3dap6vv1/6VQLbI0jftTk7fkVWEzUmuSO3RSGVPdAL5xF8o43zf" +
+        "sNUJQFKMJVIxJaoGpUAoAKMARAAjAJgE0EgBYwA1iwMyYI+BtGBJAtRjM5a0ZreWcGLzgUBgQAMAYG0BpGApgm5gqAEuYCuAcGAKABpgKwFEYHkAimCmgW5gaYJUYRqBXmGwlQxvKULEaAEFHmQLiFZhqoPgYWyC" +
+        "jGGOAGRgOAIiYG4A1gYINMB7ARzAswCYwAYAuMCIAATAGAB0jhBF4S/hmYFNCbCXvJqaKQ88Hhg0gHjAsHFjbOBoo8o8PTXR//OIxN5Soto0Pv6ZhS0R1eIURdEeRpmLoWYAwZgPiAw4H4lj+I5oIkYjrx0JBYEh" +
+        "GJdSYsMzNWJbpIsZtrDhwqRkupxR9fdPVJjd6MUY9vYGLt63LFIfWZME7uZu63yksZasoT7zHKWxOzLPAHcshMIc7mt7/3+79bUYAKIneOOXd46y1l3HmWW6XdnCt2rZuU2qbOU2ZVLpl/Zt/Zx2pE4LTXwQeYUq" +
+        "ZSRgAgAiQABBgAAAqYTKCRGDHgSBgqgJGYKUEzmBYjcBoHd5iYBYDMHMrxHVpAnZzYmVJbGOJ0GLwsGM4xGPIVGFQkmHwNhcIDC0HobYbPuTFYlD1DGakasSq0FAYBOAmFEwVVRiZquxqdWNqTFGqkCOtfY1KFtq" +
+        "//OIxKYv+qI0Hv9HZFDUVVJjUtYZqRnW1IMOXXXekNa+z/7v//bQTEFNRTMuMTAwqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" +
+        "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqrGn////6e3UoQjUUgcUmHACBgH" +
+        "oAaYacCWEwYoYG6A2GBHg0xgHY/yaC764GCfhaZi6LGBUiACkYDF5ggKAoEDwHXB//OIxEMVsQ4sAlf5QCdP////bR+/79nee7FG///0f/+qTEFNRTMuMTAwqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" +
+        "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" +
+        "qqqqqqqqqqqqqqqqqqpGv/X///N/0I0LheANpEGADgApgGwCEYYeF5mCzgNJgWQBSYAsC0mC5Dqhz1XG6Ya4FLAbNfoGVEEBi0lgYcFgGFw2BgkBgNAQRuVL2/9f//////OIxFIZeqosAlfrQP/9Xv/+3v//9t57" +
+        "rsd3f/Ru///TTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVxf////i9f/eHaj7rkLrmADACxgGoD2YXMJnGCnAbBgRIAuYDYCWGFOjc5/8+wUYs" +
+        "WE2naHQalO5lwjGOxeYmERg4GAoFrony//OIxEgW6Q4oAA/5JD//6//0fvo7v3n+xSej/99H//96TEFNRTMuMTAwqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" +
+        "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" +
+        "qqqG3////7f6OWIRIAfSMCoAmYAcA3GDCiM5gUIGmYAsAmGBRgMphPQc4fVs6PmKOAnAHUTSBpgXAZTDYGMAgBhkIgYBAoWg//OIxEYWSfIwAlfrQguc0Vv1////////ns/0Sv/9XXRVTEFNRTMuMTAwVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVWQN/////3/3Y2JIaQ+JLjAAoFQHcwIgS8MAcA7jAKAHswOAA3MLBBMz/MS0oxYkBVO4AgHVcFLgxqATDAIAgES" +
+        "//OIxEAVAQowBG/5QK3gFv///+ms58t/+lH2t//////oTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVxt////+3+yRq" +
+        "SIxg6p3DgAmFQHQwMYSxMBkA9TAcQJgwQUDCMLICMT+lkDQxYADBO4kQ1UGQEuiY//OIxDkTIQowAm/5QMAGE4XAKskAhT////9v1/T/T9rFTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVhv////8///LGmjT6tKT1C4AcYAgAzmDXiIBgaIHIYFEBUmCJAkZhS4iQfHbA8mKCgwB1JJmnSIZS//OIxDkTKRIwAg/5JA6BikNAxNxSlyrO" +
+        "v///+rZ9X/9STEFNRTMuMTAwqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" +
+        "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsH/P///F6/+NaMv65S7UJRgAgAiYBqA2GGGCPpgvQIGYIOBwGCvg6xhbA8GfghyIGKqBVoHb4YBqpFg" +
+        "ZZJAGKA6DY0GXQbnCAJWVv2////6v//9//OIxFMZiqooAA/rJB9f/6//t/+vNemlnf/9NX1f/ZTVTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" +
+        "VVVVVVVVVVVVVYY/////1//6q00PPy05S0DABxgGwBiYZCFHGC+gThgeAFeYIQDfmDfj0RxdPTGYYyFbG0oeZdRRigmmBxIS//OIxD4UcQ4sAg/5JIFULQhX9IWfs///z0t+c//v9SOlTEFNRTMuMTAwVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVXGn////7+3UoQiyFoIVGSgARDgHow1ICNMGQAPzA6wIowMUG8MCwICzI4vcwwNQLbMcxwwkkwaUh0WgAIBgAKAOuGT" +
+        "//OIxEMVoRIsAlf5QOv///+vd8ve7Tq7VfY/v/////6FTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVXX////8z/QqhMJgEaa" +
+        "gKAEzAOgCQwz8HxMGBAJTAzgFUwGYGVMDGHzDaavEMwigLCM6xExQjDCZRMGC4we//OIxD0UIQ4sAFf5QBcBA8WAjF6Ign////Of7v/53tmFTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" +
+        "VVVVVVVVVVVVVVVVVVXL//y//n6/+dSvYf9diAcwAoAOMA/AYzDTg/wwYICiMC5ACjACgXYwhEfjPUr9SjEkwskDkEOA0CjQMjFQDF41AxAIgMHAgA4Hh0hXU3/////b//OIxFIZWqooAA/rJP//1+3/7////2n+" +
+        "qSfr//7///0qTEFNRTMuMTAwqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" +
+        "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqhm/////p/sexUKAAehgAQBUwCIByMJFEkzA/wNMwFYAwMCFA0zChhWI/OiqJ" +
+        "MVKB3jrKvNOFYyuMzGggMPhkwSCS0DL7//OIxEUWMQ4sAlf5QAhFf///7Kf3fd+452rR//+n//++TEFNRTMuMTAwqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" +
+        "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpA3////" +
+        "////z/////iEVa+l4jKYAWABgUAJIAGQwMgCyMFuEajBshFYxNYNWMUrIjzL+SSk/ANzwMg2HvjEBgGMwW8DpMD7BKQECzo+//OIxE0YQQ4wBUH4ALKhUAdAwBu65/////vlPz3/7jvrXr8eEcUPmDWj4IhIPOZF" +
+        "YfuW5b9/uaZezBkigiYjBDAAQAH9QD6gib6FYBAATABQAkMACzASAHAwIEHrMcJBjqqE4wBUA0MBCCzTEkAjIcAEDAHAAowBIAoMBsA2zBBg8kx2Ll/NAjHpzA3gbYwHoBOMAsAGgcAMGibCHBteIV8YPsBcGAJA" +
+        "D5gCQACYAAAEmR0oFhm3IsIYLwBYmAgAEwwAQmAPgAJgBYAGXHWuoIxB+HLUqU2S+dFyWsxIEgAaRwcAALQaSrt43/l8Yllinp88IedqZlsM1qaNVX+cSDJa/cdl0OTWHM8//nP//paXK1TbxpdZZbsy+rfpK16n" +
+        "//OIxP9L6x40AYz4AKt+ky/+fl3/1/7/8McdZa3zmu9/nPsW8b+FqxnjnhawEsfZNdDEf4WAhI+BEHwIgP1MQU1FMy4xMDBVVBVqGoay0UxbidMrchyHK66dIKPSqlyaJoqGAX4QoNU/MBLDLGa9K05QIAmAALJl" +
+        "VSyoCAUNVOjBRIx0iMjIjCgEdCjJz41NgNlWjRRoCHZtESc1Wm+wBtq4aegGXighATFBsxYHRkMNDFBDDRoyMmMnIjHxYw8AYmAAkwwNLXPukKgFQdXTKFMkVmWyh2mdM6d6ndlnMPZxl/X9jOEqf6W4U0qjUu7V" +
+        "jNN3GlpaXlamx5lWprTYN4KC5G8Cjo3xQV3+FDfG4gor3ZBT/8FBfN4FHQngoL0V//OIxNg66e4MA8/YAZBR2T4oL0F8KOhHYgvivCjsjugqTEFNRTMuMTAwqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" +
+        "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" +
+        "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+        ) ?? Data()
+
     // MARK: - Inbound
 
     private func handleInbound(_ bytes: [UInt8]) {
