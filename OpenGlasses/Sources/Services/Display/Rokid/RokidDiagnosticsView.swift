@@ -49,6 +49,12 @@ final class RokidDiagnosticsModel: ObservableObject {
     /// the moment the wearer reopens the scene.
     private var sceneCancellable: AnyCancellable?
 
+    /// Whether the bundled Remy card flow is armed: while armed, every
+    /// completed mic clip is transcribed and asked automatically.
+    @Published private(set) var cardActive = false
+    /// The card's live status line.
+    @Published private(set) var cardStatus = "Off"
+
     /// The session layer this probe operates, exposed so the view can observe the
     /// session's own published state (registration, scene, screen, battery) directly.
     let session: RokidCXRSession
@@ -67,6 +73,9 @@ final class RokidDiagnosticsModel: ObservableObject {
         sceneCancellable = session.$aiSceneActive.sink { [weak self] active in
             guard active else { return }
             Task { @MainActor in self?.presentPendingAnswer() }
+        }
+        session.onMicClip = { [weak self] _ in
+            Task { @MainActor in await self?.handleCardClip() }
         }
     }
 
@@ -151,6 +160,43 @@ final class RokidDiagnosticsModel: ObservableObject {
 
     func playSpokenTest() async {
         await session.playSpokenTest()
+    }
+
+    /// Whether the scene-hold experiment is running.
+    @Published private(set) var sceneHoldActive = false
+    private var sceneHoldTask: Task<Void, Never>?
+
+    /// Scene-hold experiment: heartbeat every 2 s and log the scene state
+    /// every ~10 s, to learn whether the phone can keep the glasses' AI
+    /// scene open past its usual idle close. Caps itself at five minutes.
+    func toggleSceneHold() {
+        if sceneHoldActive {
+            sceneHoldTask?.cancel()
+            sceneHoldTask = nil
+            sceneHoldActive = false
+            append("scene hold: stopped by operator")
+            return
+        }
+        sceneHoldActive = true
+        append("scene hold: started, heartbeat every 2 s")
+        sceneHoldTask = Task { [weak self] in
+            var beats = 0
+            while !Task.isCancelled {
+                guard let self else { return }
+                try? await self.session.sendHeartbeat()
+                beats += 1
+                if beats % 5 == 1 {
+                    let state = self.session.aiSceneActive ? "active" : "idle"
+                    self.append("scene hold: beat " + String(beats) + ", scene " + state)
+                }
+                if beats >= 150 {
+                    self.append("scene hold: five-minute cap reached, stopping")
+                    self.sceneHoldActive = false
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
     }
 
     /// Save the session's raw in-flight photo assembly to the app's Documents
@@ -312,6 +358,34 @@ final class RokidDiagnosticsModel: ObservableObject {
         Task { await session.presentAnswer(question: pending.question, answer: pending.answer) }
     }
 
+    // MARK: - Remy card (the bundled flow)
+
+    /// Arm or disarm the bundled card flow.
+    func toggleCard() {
+        cardActive.toggle()
+        cardStatus = cardActive ? "Say Hi Rokid and ask your question" : "Off"
+        append(cardActive ? "card: armed" : "card: off")
+    }
+
+    /// While the card is armed, a completed mic clip runs the pipeline by
+    /// itself: transcribe, then ask. The recognizer's guard returns empty
+    /// text for silence, and an empty transcript never becomes a question.
+    private func handleCardClip() async {
+        guard cardActive, !relayWaiting else { return }
+        cardStatus = "Transcribing..."
+        await transcribeMicClip()
+        guard cardActive else { return }
+        if let text = micTranscript, !text.isEmpty {
+            cardStatus = "Asking Remy..."
+            await askRemy()
+            if cardActive {
+                cardStatus = session.aiSceneActive ? "Answered" : "Answered - say Hi Rokid to see it on the lens"
+            }
+        } else {
+            cardStatus = "Heard nothing - ask again"
+        }
+    }
+
     /// Decode an audio file to mono Float samples via AVAudioFile.
     private static func decodeSamples(url: URL) throws -> ([Float], Double) {
         let file = try AVAudioFile(forReading: url)
@@ -407,6 +481,7 @@ struct RokidDiagnosticsView: View {
     var body: some View {
         NavigationStack {
             List {
+                cardSection
                 accessoriesSection
                 sessionSection
                 commandSection
@@ -416,6 +491,28 @@ struct RokidDiagnosticsView: View {
             .navigationTitle("Rokid probe")
             .navigationBarTitleDisplayMode(.inline)
             .task { model.refreshAccessories() }
+        }
+    }
+
+    private var cardSection: some View {
+        Section("Remy") {
+            Button(model.cardActive ? "Deactivate card" : "Activate card") {
+                model.toggleCard()
+            }
+            Text(model.cardStatus)
+                .font(.system(.caption, design: .default))
+            if let transcript = model.micTranscript {
+                Text(transcript)
+                    .font(.system(.caption, design: .default))
+                    .foregroundStyle(.secondary)
+            }
+            if let answer = model.relayAnswer {
+                Text("Remy: " + answer)
+                    .font(.system(.caption, design: .default))
+            }
+            Text("While the card is active: say the wake word, ask out loud, and the rest runs itself — transcribe, ask, and the answer on the lens when the scene reopens.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -542,6 +639,12 @@ struct RokidDiagnosticsView: View {
             Button("Play spoken test (TTS + tone)") {
                 Task { await model.playSpokenTest() }
             }
+            Button(model.sceneHoldActive ? "Stop scene hold" : "Hold scene (heartbeat)") {
+                model.toggleSceneHold()
+            }
+            Text("Experiment: heartbeats every 2 s while the AI scene is open. Say the wake word, start the hold, then wait and watch whether AI scene stays active past its usual close.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             Button("Save photo buffer") {
                 model.savePhotoBuffer()
             }
