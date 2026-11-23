@@ -25,6 +25,8 @@ final class RokidDiagnosticsModel: ObservableObject {
     @Published var demoText = "Hello from Avenkin"
     /// Where the last saved photo buffer landed, once one has been saved.
     @Published private(set) var photoBufferURL: URL?
+    /// Where the last saved mic clip landed, once one has been saved.
+    @Published private(set) var micClipURL: URL?
 
     /// The session layer this probe operates, exposed so the view can observe the
     /// session's own published state (registration, scene, screen, battery) directly.
@@ -145,6 +147,24 @@ final class RokidDiagnosticsModel: ObservableObject {
             append("photo buffer saved: \(name) (\(data.count) B) — tap Share photo buffer")
         } catch {
             append("photo buffer save failed: \(String(describing: error))")
+        }
+    }
+
+    /// Save the session's last completed mic clip (Ogg-Opus) to a shareable
+    /// file, for offline decode and verification.
+    func saveMicClip() {
+        guard let clip = session.lastMicClip, !clip.isEmpty else {
+            append("mic clip: nothing captured yet")
+            return
+        }
+        let name = "avenkin-mic-\(Int(Date().timeIntervalSince1970)).opus"
+        do {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+            try clip.write(to: url)
+            micClipURL = url
+            append("mic clip saved: \(name) (\(clip.count) B) — tap Share mic clip")
+        } catch {
+            append("mic clip save failed: \(String(describing: error))")
         }
     }
 
@@ -289,6 +309,12 @@ struct RokidDiagnosticsView: View {
                 Text(session.lastPhoto.map { "\($0.count) B (\(session.photoChunksReceived) chunks)" } ?? (session.photoChunksReceived > 0 ? "receiving… \(session.photoChunksReceived) chunks" : "-"))
                     .font(.system(.caption, design: .monospaced))
             }
+            HStack {
+                Text("Mic")
+                Spacer()
+                Text(session.lastMicClip.map { "\($0.count) B (\(session.micChunksReceived) chunks)" } ?? (session.micChunksReceived > 0 ? "receiving… \(session.micChunksReceived) chunks" : "-"))
+                    .font(.system(.caption, design: .monospaced))
+            }
             if let photo = session.lastPhoto, let image = UIImage(data: photo) {
                 Image(uiImage: image)
                     .resizable()
@@ -355,6 +381,14 @@ struct RokidDiagnosticsView: View {
             if let url = model.photoBufferURL {
                 ShareLink(item: url) {
                     Text("Share photo buffer")
+                }
+            }
+            Button("Save mic clip") {
+                model.saveMicClip()
+            }
+            if let url = model.micClipURL {
+                ShareLink(item: url) {
+                    Text("Share mic clip")
                 }
             }
             Text("The photo streams back in 480 B chunks — watch the log for the transfer start and \"photo complete\", and the Photo row in Session. Whether OpenCamera must come first is unproven; try Take photo alone first.")

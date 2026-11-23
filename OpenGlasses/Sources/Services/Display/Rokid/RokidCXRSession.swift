@@ -61,6 +61,12 @@ final class RokidCXRSession: ObservableObject {
     /// completes: a short final chunk, or an MD5 match against the glasses'
     /// own `Med_TransportMediaFile` announcement.
     @Published private(set) var lastPhoto: Data?
+    /// Route `0x3002` chunks in the current (or last completed) mic clip.
+    @Published private(set) var micChunksReceived = 0
+    /// The last completed microphone clip, reassembled from its chunks —
+    /// an Ogg-Opus byte stream (16 kHz mono), directly saveable as `.opus`.
+    /// Set when the stream goes quiet or the AI scene closes.
+    @Published private(set) var lastMicClip: Data?
 
     // MARK: - Callbacks
 
@@ -72,6 +78,8 @@ final class RokidCXRSession: ObservableObject {
     var onAudioChunk: ((Data) -> Void)?
     /// A completed photo from the glasses (route `0x2002`, reassembled).
     var onPhoto: ((Data) -> Void)?
+    /// A completed microphone clip from the glasses (route `0x3002`, reassembled).
+    var onMicClip: ((Data) -> Void)?
     /// One human-readable line per send, receive, and state change.
     var onTrace: ((String) -> Void)?
     var onDisconnect: ((Error?) -> Void)?
@@ -92,6 +100,13 @@ final class RokidCXRSession: ObservableObject {
     /// Bumped on every photo chunk and every completion; a quiet-period task
     /// fires only if its captured generation is still current after sleeping.
     private var photoGeneration = 0
+    /// In-flight microphone assembly (route `0x3002` inbound): the Ogg-Opus
+    /// byte stream, concatenated in arrival order — Ogg is a byte stream,
+    /// so arrival order is file order.
+    private var micAssembly = Data()
+    /// Bumped on every mic chunk and every completion; a quiet-period task
+    /// fires only if its captured generation is still current after sleeping.
+    private var micGeneration = 0
 
     init(
         clientUUID: String = RokidCXRSession.registeredClientUUID,
@@ -491,10 +506,7 @@ final class RokidCXRSession: ObservableObject {
         case 0x2002, 0x2003:
             handlePhotoChunk(route: route, caps: caps)
         case 0x3002:
-            audioChunksReceived += 1
-            if caps.count > 1, case .binary(let data) = caps[1] {
-                onAudioChunk?(data)
-            }
+            handleMicChunk(caps)
         default:
             if let message = RokidCapsMessage.decodeCaps(caps) {
                 switch message {
@@ -579,6 +591,48 @@ final class RokidCXRSession: ObservableObject {
         }
     }
 
+    /// Reassemble the microphone uplink (route `0x3002` inbound): `uBuk`
+    /// chunks whose binary member is a slice of one Ogg-Opus byte stream
+    /// (OpusHead first, 16 kHz mono — mined from the 2026-11-21 capture).
+    /// Concatenated in arrival order they form a saveable `.opus` file.
+    /// A clip completes when the stream goes quiet for 3 s or the AI scene
+    /// closes; chunks are counted, not traced (~25 a second while listening).
+    private func handleMicChunk(_ caps: [RokidCapsValue]) {
+        audioChunksReceived += 1
+        guard caps.count > 1, case .binary(let data) = caps[1] else { return }
+        onAudioChunk?(data)
+        if micAssembly.isEmpty {
+            micChunksReceived = 0
+            let magic = data.prefix(4).map { String(format: "%02x", $0) }.joined(separator: " ")
+            trace("RX mic stream started: first chunk \(data.count) B [\(magic)]")
+        }
+        micAssembly.append(data)
+        micChunksReceived += 1
+        armMicQuietFinalizer()
+    }
+
+    private func armMicQuietFinalizer() {
+        micGeneration += 1
+        let generation = micGeneration
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard let self, generation == self.micGeneration else { return }
+            self.completeMicClip(reason: "stream quiet")
+        }
+    }
+
+    /// Close out the in-flight mic assembly, if any. Also called when the
+    /// AI scene closes — the listen window is over either way.
+    private func completeMicClip(reason: String) {
+        guard !micAssembly.isEmpty else { return }
+        micGeneration += 1
+        let clip = micAssembly
+        micAssembly = Data()
+        lastMicClip = clip
+        trace("RX mic clip complete: \(clip.count) B in \(micChunksReceived) chunks (\(reason))")
+        onMicClip?(clip)
+    }
+
     private func completePhotoTransfer(buffer: Data, verified: Bool, boundary: Bool = false, quiet: Bool = false) {
         photoGeneration += 1
         lastPhoto = buffer
@@ -633,6 +687,7 @@ final class RokidCXRSession: ObservableObject {
             case "Ai_SceneStatus":
                 if let json = Self.jsonObject(text), let running = json["aiAssistRunning"] as? Bool {
                     aiSceneActive = running
+                    if !running { completeMicClip(reason: "scene closed") }
                 }
             case "Dev_Screen_Status":
                 if let json = Self.jsonObject(text), let on = json["screen_on"] as? Bool {
