@@ -1,3 +1,4 @@
+import AVFoundation
 import Combine
 import ExternalAccessory
 import Foundation
@@ -27,6 +28,10 @@ final class RokidDiagnosticsModel: ObservableObject {
     @Published private(set) var photoBufferURL: URL?
     /// Where the last saved mic clip landed, once one has been saved.
     @Published private(set) var micClipURL: URL?
+    /// The on-device transcript of the last mic clip, once transcribed.
+    @Published private(set) var micTranscript: String?
+    /// The app's own SenseVoice engine, reused across taps (model loads lazily).
+    private let asrEngine = OnDeviceASREngine()
 
     /// The session layer this probe operates, exposed so the view can observe the
     /// session's own published state (registration, scene, screen, battery) directly.
@@ -166,6 +171,52 @@ final class RokidDiagnosticsModel: ObservableObject {
         } catch {
             append("mic clip save failed: \(String(describing: error))")
         }
+    }
+
+    /// Transcribe the last mic clip on-device, through the app's own
+    /// SenseVoice engine. The clip is Ogg-Opus; AVAudioFile gets first
+    /// refusal on decoding it — if this iOS build's AVFoundation cannot
+    /// open Opus, the failure is logged plainly and the decode gap is the
+    /// next problem to solve.
+    func transcribeMicClip() async {
+        guard let clip = session.lastMicClip, !clip.isEmpty else {
+            append("transcribe: no mic clip yet")
+            return
+        }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("avenkin-mic-transcribe.opus")
+        do {
+            try clip.write(to: url)
+            let (samples, rate) = try Self.decodeSamples(url: url)
+            append("transcribe: decoded \(samples.count) samples @ \(Int(rate)) Hz")
+            guard OnDeviceASREngine.isCompiledIn else {
+                append("transcribe: on-device ASR not compiled into this build")
+                return
+            }
+            guard asrEngine.isReady else {
+                append("transcribe: SenseVoice model not downloaded yet — grab it in the app's ASR settings, then retry")
+                return
+            }
+            let text = try await asrEngine.transcribe(samples: samples, sampleRate: rate)
+            micTranscript = text
+            append(text.isEmpty ? "transcript: (empty)" : "transcript: \(text)")
+        } catch {
+            append("transcribe failed: \(String(describing: error))")
+        }
+    }
+
+    /// Decode an audio file to mono Float samples via AVAudioFile.
+    private static func decodeSamples(url: URL) throws -> ([Float], Double) {
+        let file = try AVAudioFile(forReading: url)
+        let format = file.processingFormat
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(file.length)) else {
+            throw ASRError.recognitionFailed
+        }
+        try file.read(into: buffer)
+        guard let channel = buffer.floatChannelData?[0] else {
+            throw ASRError.recognitionFailed
+        }
+        let samples = Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
+        return (samples, format.sampleRate)
     }
 
     func sendComposedCommand() async {
@@ -315,6 +366,10 @@ struct RokidDiagnosticsView: View {
                 Text(session.lastMicClip.map { "\($0.count) B (\(session.micChunksReceived) chunks)" } ?? (session.micChunksReceived > 0 ? "receiving… \(session.micChunksReceived) chunks" : "-"))
                     .font(.system(.caption, design: .monospaced))
             }
+            if let transcript = model.micTranscript {
+                Text(transcript)
+                    .font(.system(.caption, design: .default))
+            }
             if let photo = session.lastPhoto, let image = UIImage(data: photo) {
                 Image(uiImage: image)
                     .resizable()
@@ -385,6 +440,9 @@ struct RokidDiagnosticsView: View {
             }
             Button("Save mic clip") {
                 model.saveMicClip()
+            }
+            Button("Transcribe mic clip") {
+                Task { await model.transcribeMicClip() }
             }
             if let url = model.micClipURL {
                 ShareLink(item: url) {
