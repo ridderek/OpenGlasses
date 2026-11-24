@@ -44,7 +44,7 @@ final class RokidDiagnosticsModel: ObservableObject {
     @Published private(set) var relayWaiting = false
     /// An answer that arrived while the AI scene was closed, held until the
     /// scene next opens (the lens only renders inside the scene).
-    private var pendingPresentation: (question: String, answer: String)?
+    private var pendingPresentation: (question: String, answer: String, audio: Data?)?
     /// Watches the session's scene state so a held answer presents itself
     /// the moment the wearer reopens the scene.
     private var sceneCancellable: AnyCancellable?
@@ -338,7 +338,11 @@ final class RokidDiagnosticsModel: ObservableObject {
                     relayAnswer = text
                     relayWaiting = false
                     append("remy: " + text)
-                    pendingPresentation = (question, text)
+                    var audio: Data? = nil
+                    if let audioPath = obj?["audio_url"] as? String, let audioURL = URL(string: audioPath) {
+                        audio = await downloadAnswerAudio(url: audioURL, token: token)
+                    }
+                    pendingPresentation = (question, text, audio)
                     presentPendingAnswer()
                     return
                 }
@@ -350,12 +354,55 @@ final class RokidDiagnosticsModel: ObservableObject {
         append("relay: no answer after four minutes, giving up the wait")
     }
 
+    /// Fetch an answer's voice (MP3) from the relay.
+    private func downloadAnswerAudio(url: URL, token: String) async -> Data? {
+        do {
+            var request = URLRequest(url: url)
+            request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200, !data.isEmpty else {
+                append("relay: answer voice download failed")
+                return nil
+            }
+            append("relay: answer voice downloaded, " + String(data.count) + " B")
+            return data
+        } catch {
+            append("relay: answer voice download failed")
+            return nil
+        }
+    }
+
+    /// Isolation test: download a fixed fixture MP3 from the relay and
+    /// stream it as an utterance's voice, bypassing the ask/answer flow.
+    /// kind "chirp" fetches the exact bytes of the embedded test chirp;
+    /// kind "voice" fetches a synthesized spoken sentence.
+    func voiceDownloadTest(kind: String) async {
+        let id = kind == "chirp"
+            ? "11111111-2222-3333-4444-555555555555"
+            : "66666666-7777-8888-9999-000000000000"
+        let token = relayToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else {
+            append("voice test: paste the relay token first")
+            return
+        }
+        guard let url = URL(string: "https://relay.apsisai.com/audio/" + id) else { return }
+        append("voice test: downloading " + kind)
+        guard let data = await downloadAnswerAudio(url: url, token: token) else { return }
+        append("voice test: streaming " + kind + ", " + String(data.count) + " B")
+        await session.speakDownloaded(mp3: data)
+    }
+
     /// Render a held answer on the lens if the AI scene is open. Called when
-    /// an answer lands and whenever the scene opens.
+    /// an answer lands and whenever the scene opens. With a voice attached,
+    /// the answer is spoken as well as shown.
     private func presentPendingAnswer() {
         guard let pending = pendingPresentation, session.aiSceneActive else { return }
         pendingPresentation = nil
-        Task { await session.presentAnswer(question: pending.question, answer: pending.answer) }
+        if let audio = pending.audio {
+            Task { await session.speakAnswer(question: pending.question, answer: pending.answer, mp3: audio) }
+        } else {
+            Task { await session.presentAnswer(question: pending.question, answer: pending.answer) }
+        }
     }
 
     // MARK: - Remy card (the bundled flow)
@@ -639,6 +686,15 @@ struct RokidDiagnosticsView: View {
             Button("Play spoken test (TTS + tone)") {
                 Task { await model.playSpokenTest() }
             }
+            Button("Voice test 1: downloaded chirp") {
+                Task { await model.voiceDownloadTest(kind: "chirp") }
+            }
+            Button("Voice test 2: downloaded voice") {
+                Task { await model.voiceDownloadTest(kind: "voice") }
+            }
+            Text("Isolation ladder: open the AI scene first, then tap. Test 1 streams the proven chirp bytes fetched from the relay; test 2 streams a synthesized sentence the same way.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             Button(model.sceneHoldActive ? "Stop scene hold" : "Hold scene (heartbeat)") {
                 model.toggleSceneHold()
             }

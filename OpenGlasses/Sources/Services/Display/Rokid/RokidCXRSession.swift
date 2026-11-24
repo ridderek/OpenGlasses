@@ -317,43 +317,162 @@ final class RokidCXRSession: ObservableObject {
     }
 
     func playTestTone() async {
+        await streamMP3(Self.testToneMP3)
+    }
+
+    /// Speak an answer aloud: the paced choreography declares the TTS
+    /// utterance on the lens, then the supplied MP3 (16 kHz mono, the
+    /// proven format) streams as that utterance's voice.
+    func speakAnswer(question: String, answer: String, mp3: Data) async {
+        // A faithful copy of the captured official episode's shape
+        // (re-mined 2026-11-23): TTS_Result arrives sentence by sentence
+        // — two before the stream, the rest interleaved with it — the
+        // stream runs in fast bursts, and heartbeats continue through
+        // the whole playback that follows the stream.
+        await sendOrTrace(channel: "Sys", method: "Sys_Cloud_Server_Status", payload: .string("{\"status\":1}"))
+        await sendOrTrace(channel: "Ai", method: "Ai_Heartbeat", payload: .string("{\"count\":1}"))
+        let partials = Self.partials(for: question)
+        for (index, partial) in partials.enumerated() {
+            if index > 0 { try? await Task.sleep(nanoseconds: 200_000_000) }
+            await sendOrTrace(channel: "Ai", method: "ASR_Result", payload: .string(partial))
+        }
+        await sendOrTrace(channel: "Ai", method: "ASR_End", payload: nil)
+        try? await Task.sleep(nanoseconds: 900_000_000)
+        await sendOrTrace(channel: "Ai", method: "Ai_Heartbeat", payload: .string("{\"count\":1}"))
+        let sentences = Self.sentences(of: answer)
+        await sendOrTrace(channel: "Ai", method: "TTS_Result", payload: .string(sentences[0]))
+        if sentences.count > 1 {
+            await sendOrTrace(channel: "Ai", method: "TTS_Result", payload: .string(sentences[1]))
+        }
+        guard await openAudioPlayback() else { return }
+        let bounds = Self.segmentBounds(sentences: sentences, totalBytes: mp3.count)
+        for (index, bound) in bounds.enumerated() {
+            await sendAudioChunks(mp3.subdata(in: bound), chunkSize: 2048, paceNanoseconds: 90_000_000)
+            if index + 2 < sentences.count {
+                await sendOrTrace(channel: "Ai", method: "TTS_Result", payload: .string(sentences[index + 2]))
+            }
+            if index < bounds.count - 1 {
+                await sendOrTrace(channel: "Ai", method: "Ai_Heartbeat", payload: .string("{\"count\":1}"))
+            }
+        }
+        await closeAudioPlayback()
+        // Playback continues on the glasses from their buffer long
+        // after the stream ends; the official phone keeps heartbeating
+        // through it. Do the same for the estimated remainder.
+        let audioSeconds = Double(mp3.count) / 8000.0
+        let streamedSeconds = Double(mp3.count) / 21000.0
+        var remaining = min(audioSeconds - streamedSeconds, 35.0)
+        while remaining > 0 {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            await sendOrTrace(channel: "Ai", method: "Ai_Heartbeat", payload: .string("{\"count\":1}"))
+            remaining -= 2.0
+        }
+    }
+
+    /// Split an answer into sentences on ". ", "? ", "! " boundaries,
+    /// keeping the punctuation. Falls back to the whole text.
+    private static func sentences(of text: String) -> [String] {
+        var result: [String] = []
+        var current = ""
+        let chars = Array(text)
+        var i = 0
+        while i < chars.count {
+            current.append(chars[i])
+            if (chars[i] == "." || chars[i] == "?" || chars[i] == "!"),
+               i + 1 < chars.count, chars[i + 1] == " " {
+                result.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+                i += 1
+            }
+            i += 1
+        }
+        let tail = current.trimmingCharacters(in: .whitespaces)
+        if !tail.isEmpty { result.append(tail) }
+        return result.isEmpty ? [text] : result
+    }
+
+    /// Byte ranges of the MP3, one per sentence, sized by each
+    /// sentence's share of the answer's characters.
+    private static func segmentBounds(sentences: [String], totalBytes: Int) -> [Range<Int>] {
+        let totalChars = max(sentences.reduce(0) { $0 + $1.count }, 1)
+        var bounds: [Range<Int>] = []
+        var start = 0
+        for (index, sentence) in sentences.enumerated() {
+            let end = index == sentences.count - 1
+                ? totalBytes
+                : start + totalBytes * sentence.count / totalChars
+            bounds.append(start..<max(end, start))
+            start = end
+        }
+        return bounds
+    }
+
+    /// Isolation ladder for the silent relay answers: present a short
+    /// utterance with the PROVEN chirp-test parameters (slow choreography,
+    /// 1,024 B chunks at 120 ms), streaming caller-supplied bytes instead
+    /// of the embedded chirp.
+    func speakDownloaded(mp3: Data) async {
+        await presentAnswer(question: "Voice test", answer: "This is a downloaded voice test.")
+        await streamMP3(mp3)
+    }
+
+    /// Stream an MP3 to the glasses' speaker: playAudio descriptor, 1,024 B
+    /// chunks on the audio-data route at a 120 ms pace, then the stop tuple.
+    /// Only audible while a TTS utterance is open (see playSpokenTest).
+    /// Open an audio playback on the glasses: the playAudio descriptor.
+    /// Member 1 is the audio route's own small counter — in the captured
+    /// official flow the glasses announced 2 and the phone answered 3,
+    /// while the command sequence was at 153 — NOT the session sequence.
+    private func openAudioPlayback() async -> Bool {
         guard isConnected else {
             trace("TX playAudio skipped: not connected")
-            return
+            return false
         }
         let descriptor: [RokidCapsValue] = [
             .uint32(RokidCapsRoute.audioPlay.rawValue),
-            .uint32(sequence),
+            .uint32(3),
             .string("playAudio"),
             .object([.int32(-1), .float(1.0), .uint32(1), .uint32(16000)]),
             .uint32(2),
             .uint32(3),
         ]
-        if await sendAudioTuple(descriptor, label: "playAudio (route 0x3001)") {
-            sequence &+= 1
-            nextSequence = sequence
-        }
-        let mp3 = Self.testToneMP3
+        return await sendAudioTuple(descriptor, label: "playAudio (route 0x3001)")
+    }
+
+    /// Stream MP3 bytes as audio-data chunks. The selector member is the
+    /// playback id (2), the clock 0 — the official stream's canonical
+    /// chunk shape (the re-mined capture, 2026-11-23).
+    private func sendAudioChunks(_ mp3: Data, chunkSize: Int, paceNanoseconds: UInt64) async {
         var offset = 0
         var chunks = 0
         while offset < mp3.count {
-            let end = min(offset + 1024, mp3.count)
+            let end = min(offset + chunkSize, mp3.count)
             let tuple: [RokidCapsValue] = [
                 .uint32(RokidCapsRoute.audioData.rawValue),
                 .binary(mp3.subdata(in: offset..<end)),
-                .uint32(3),
+                .uint32(2),
                 .uint64(0),
             ]
             _ = await sendAudioTuple(tuple, label: nil)
             chunks += 1
             offset = end
-            if offset < mp3.count { try? await Task.sleep(nanoseconds: 120_000_000) }
+            if offset < mp3.count { try? await Task.sleep(nanoseconds: paceNanoseconds) }
         }
         trace("TX audio stream: \(chunks) chunks, \(mp3.count) B of MP3 (16 kHz mono)")
-        try? await Task.sleep(nanoseconds: 500_000_000)
+    }
+
+    /// Close a playback: the stop tuple in the same batch as the last
+    /// chunk (the official phone paused ~0 ms, not 500).
+    private func closeAudioPlayback() async {
         _ = await sendAudioTuple(
             [.uint32(RokidCapsRoute.audioStop.rawValue), .uint32(2)],
             label: "audio stop (route 0x3003)")
+    }
+
+    private func streamMP3(_ mp3: Data, chunkSize: Int = 1024, paceNanoseconds: UInt64 = 120_000_000) async {
+        guard await openAudioPlayback() else { return }
+        await sendAudioChunks(mp3, chunkSize: chunkSize, paceNanoseconds: paceNanoseconds)
+        await closeAudioPlayback()
     }
 
     /// Encode and send one audio-route tuple; returns whether the write landed.
@@ -503,6 +622,10 @@ final class RokidCXRSession: ObservableObject {
             let payload = members.count > 1 ? members[1] : nil
             applyEvent(channel: channel, method: method, payload: payload)
             onEvent?(channel, method, payload)
+            if channel == "Sys", method == "Sys_Msg_Tts_Stop" {
+                // The official phone acks the glasses' TTS-stop request.
+                Task { await sendOrTrace(channel: "Sys", method: "Sys_Msg_Tts_Stopped", payload: nil) }
+            }
         case 0x2002, 0x2003:
             handlePhotoChunk(route: route, caps: caps)
         case 0x3002:
